@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocBook - Find & Book Doctors</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="logo">DocBook 🩺</div>
+            <nav>
+                <a href="#home">Home</a>
+                <a href="#doctors">Find Doctors</a>
+                <a href="#about">About</a>
+                <a href="#contact" class="btn-primary">Contact</a>
+            </nav>
+        </div>
+    </header>
+
+    <section id="home" class="hero">
+        <div class="container">
+            <h1>Your Health, Our Priority</h1>
+            <p>Book appointments with the best doctors in your area instantly.</p>
+            <a href="#doctors" class="btn-primary">Book Now</a>
+        </div>
+    </section>
+
+    <section id="doctors" class="doctors-section">
+        <div class="container">
+            <h2>Available Specialists</h2>
+            <div class="doctors-grid" id="doctors-list">
+                <!-- Doctors will be injected here by JS -->
+            </div>
+        </div>
+    </section>
+
+    <div id="booking-modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h3>Book Appointment</h3>
+            <p id="booking-doctor-name"></p>
+            <form id="booking-form">
+                <div class="form-group">
+                    <label for="name">Full Name</label>
+                    <input type="text" id="name" required>
+                </div>
+                <div class="form-group">
+                    <label for="date">Date</label>
+                    <input type="date" id="date" required>
+                </div>
+                <div class="form-group">
+                    <label for="time">Time</label>
+                    <select id="time" required>
+                        <option value="">Select Time</option>
+                        <option value="09:00">09:00 AM</option>
+                        <option value="10:00">10:00 AM</option>
+                        <option value="11:00">11:00 AM</option>
+                        <option value="14:00">02:00 PM</option>
+                        <option value="15:00">03:00 PM</option>
+                        <option value="16:00">04:00 PM</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn-primary full-width">Confirm Booking</button>
+            </form>
+        </div>
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2026 DocBook. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
