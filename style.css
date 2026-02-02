@@ -89,7 +89,7 @@ nav a:hover {
     display: flex;
     justify-content: center;
     gap: 15px;
-    margin-bottom: 40px;
+    margin-bottom: 25px;
 }
 
 .filter-btn {
@@ -107,6 +107,45 @@ nav a:hover {
     border-color: var(--primary-color);
     background-color: var(--primary-color);
     color: var(--white);
+}
+
+.advanced-filters {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    display: flex;
+    gap: 30px;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 40px;
+    flex-wrap: wrap;
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+    min-width: 200px;
+}
+
+.filter-group label {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-color);
+}
+
+.filter-group select {
+    padding: 8px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    outline: none;
+}
+
+.filter-group input[type=range] {
+    width: 100%;
+    cursor: pointer;
 }
 
 /* Hero Section */

@@ -38,6 +38,20 @@
                 <button class="filter-btn" data-filter="beauty">Beauty & Wellness</button>
             </div>
 
+            <div class="advanced-filters">
+                <div class="filter-group">
+                    <label>Specialty</label>
+                    <select id="specialty-filter">
+                        <option value="all">All Specialties</option>
+                        <!-- Populated by JS -->
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Max Distance: <span id="distance-val">10</span> km</label>
+                    <input type="range" id="distance-filter" min="1" max="10" value="10" step="0.5">
+                </div>
+            </div>
+
             <div class="doctors-grid" id="doctors-list">
                 <!-- Providers will be injected here by JS -->
             </div>

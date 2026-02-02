@@ -63,17 +63,86 @@ const providers = [
     }
 ];
 
+// Elements
 const doctorsList = document.getElementById('doctors-list');
 const filterBtns = document.querySelectorAll('.filter-btn');
-const modal = document.getElementById('booking-modal');
-const modalBody = document.getElementById('modal-body');
-const closeBtn = document.querySelector('.close');
+const specialtySelect = document.getElementById('specialty-filter');
+const distanceInput = document.getElementById('distance-filter');
+const distanceValSpan = document.getElementById('distance-val');
 
-// Render List
-function renderProviders(filter = 'all') {
-    const filtered = filter === 'all' 
+// State
+let currentType = 'all';
+let currentSpecialty = 'all';
+let maxDistance = 10;
+
+// Initialize
+function init() {
+    setupFilters();
+    updateSpecialtyOptions();
+    renderProviders();
+}
+
+// Setup Event Listeners
+function setupFilters() {
+    // Type Buttons
+    filterBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            filterBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentType = btn.dataset.filter;
+            currentSpecialty = 'all'; // Reset specialty on type change
+            updateSpecialtyOptions();
+            renderProviders();
+        });
+    });
+
+    // Specialty Select
+    specialtySelect.addEventListener('change', (e) => {
+        currentSpecialty = e.target.value;
+        renderProviders();
+    });
+
+    // Distance Slider
+    distanceInput.addEventListener('input', (e) => {
+        maxDistance = parseFloat(e.target.value);
+        distanceValSpan.textContent = maxDistance;
+        renderProviders();
+    });
+}
+
+// Populate Specialty Dropdown dynamically
+function updateSpecialtyOptions() {
+    const relevantProviders = currentType === 'all' 
         ? providers 
-        : providers.filter(p => p.type === filter);
+        : providers.filter(p => p.type === currentType);
+    
+    const uniqueCategories = [...new Set(relevantProviders.map(p => p.category))].sort();
+
+    specialtySelect.innerHTML = '<option value="all">All Specialties</option>' + 
+        uniqueCategories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+}
+
+// Parse distance string to float
+function getDistance(distStr) {
+    return parseFloat(distStr.split(' ')[0]);
+}
+
+// Render Grid
+function renderProviders() {
+    // Filter Logic
+    const filtered = providers.filter(provider => {
+        const typeMatch = currentType === 'all' || provider.type === currentType;
+        const specialtyMatch = currentSpecialty === 'all' || provider.category === currentSpecialty;
+        const distanceMatch = getDistance(provider.distance) <= maxDistance;
+
+        return typeMatch && specialtyMatch && distanceMatch;
+    });
+
+    // Render HTML
+    if (filtered.length === 0) {
+        doctorsList.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: #6b7280;">No professionals found matching your criteria.</div>';
+        return;
+    }
 
     doctorsList.innerHTML = filtered.map(provider => `
         <div class="doctor-card">
@@ -91,16 +160,11 @@ function renderProviders(filter = 'all') {
     `).join('');
 }
 
-// Filter Logic
-filterBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-        filterBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        renderProviders(btn.dataset.filter);
-    });
-});
+// --- Modal Logic (Same as before) ---
+const modal = document.getElementById('booking-modal');
+const modalBody = document.getElementById('modal-body');
+const closeBtn = document.querySelector('.close');
 
-// Open Modal Details
 function openDetails(id) {
     const provider = providers.find(p => p.id === id);
     if (!provider) return;
@@ -152,7 +216,6 @@ function openDetails(id) {
     modal.style.display = 'flex';
 }
 
-// Handle Booking
 window.handleBooking = function(e, providerName) {
     e.preventDefault();
     alert(`Booking Confirmed for ${providerName}!\nWe will send you a confirmation message.`);
@@ -162,5 +225,5 @@ window.handleBooking = function(e, providerName) {
 closeBtn.onclick = () => modal.style.display = 'none';
 window.onclick = (e) => { if (e.target == modal) modal.style.display = 'none'; }
 
-// Init
-renderProviders();
+// Start
+init();
