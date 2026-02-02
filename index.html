@@ -30,9 +30,16 @@
 
     <section id="doctors" class="doctors-section">
         <div class="container">
-            <h2>Available Specialists</h2>
+            <h2>Find Professionals</h2>
+            
+            <div class="filters">
+                <button class="filter-btn active" data-filter="all">All</button>
+                <button class="filter-btn" data-filter="medical">Doctors</button>
+                <button class="filter-btn" data-filter="beauty">Beauty & Wellness</button>
+            </div>
+
             <div class="doctors-grid" id="doctors-list">
-                <!-- Doctors will be injected here by JS -->
+                <!-- Providers will be injected here by JS -->
             </div>
         </div>
     </section>
@@ -40,31 +47,9 @@
     <div id="booking-modal" class="modal">
         <div class="modal-content">
             <span class="close">&times;</span>
-            <h3>Book Appointment</h3>
-            <p id="booking-doctor-name"></p>
-            <form id="booking-form">
-                <div class="form-group">
-                    <label for="name">Full Name</label>
-                    <input type="text" id="name" required>
-                </div>
-                <div class="form-group">
-                    <label for="date">Date</label>
-                    <input type="date" id="date" required>
-                </div>
-                <div class="form-group">
-                    <label for="time">Time</label>
-                    <select id="time" required>
-                        <option value="">Select Time</option>
-                        <option value="09:00">09:00 AM</option>
-                        <option value="10:00">10:00 AM</option>
-                        <option value="11:00">11:00 AM</option>
-                        <option value="14:00">02:00 PM</option>
-                        <option value="15:00">03:00 PM</option>
-                        <option value="16:00">04:00 PM</option>
-                    </select>
-                </div>
-                <button type="submit" class="btn-primary full-width">Confirm Booking</button>
-            </form>
+            <div id="modal-body">
+                <!-- Dynamic Content -->
+            </div>
         </div>
     </div>
 
