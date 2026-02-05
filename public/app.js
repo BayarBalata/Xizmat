@@ -1,5 +1,6 @@
 import { db, auth, storage } from "./firebase-config.js";
-import { collection, getDocs, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { RecaptchaVerifier, signInWithPhoneNumber } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
 // DOM Elements
@@ -60,9 +61,7 @@ function setupEventListeners() {
     };
 
     // Login Modal
-    if (loginBtn) {
-        loginBtn.onclick = () => authModal.style.display = 'flex';
-    }
+
 
     // Close Modals
     document.querySelectorAll('.close, .close-booking').forEach(btn => {
@@ -109,36 +108,237 @@ function setupEventListeners() {
         });
     });
 
-    // Auth Form (Simulation for Prototype)
-    const authForm1 = document.getElementById('auth-form-step-1');
-    const authForm2 = document.getElementById('auth-form-step-2');
 
-    if (authForm1) {
-        authForm1.onsubmit = (e) => {
+    // Authentication Logic
+
+
+    // AUTHENTICATION LOGIC (Redesigned)
+    let authStep = 'choice';
+    let tempAuthData = null;
+
+
+    // 1. Initialize ReCAPTCHA
+    if (!window.recaptchaVerifier) {
+        window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+            'size': 'invisible',
+            'callback': (response) => {
+                // reCAPTCHA solved, allow signInWithPhoneNumber.
+                // onSignInSubmit(); 
+            }
+        });
+    }
+
+    // 2. Open Auth Modal
+    if (loginBtn) {
+        loginBtn.addEventListener('click', () => {
+            authModal.style.display = 'flex';
+            showAuthStep('choice');
+        });
+    }
+
+    // 2. Step Switching Logic
+    window.showAuthStep = function (step) {
+        authStep = step;
+        // Hide all
+        document.getElementById('auth-step-0').style.display = 'none';
+        document.getElementById('auth-form-register').style.display = 'none';
+        document.getElementById('auth-form-login').style.display = 'none';
+        document.getElementById('auth-form-owner').style.display = 'none';
+        document.getElementById('auth-form-verify').style.display = 'none';
+
+        // Show target
+        if (step === 'choice') {
+            document.getElementById('auth-step-0').style.display = 'block';
+        } else if (step === 'register') {
+            document.getElementById('auth-form-register').style.display = 'block';
+        } else if (step === 'login') {
+            document.getElementById('auth-form-login').style.display = 'block';
+        } else if (step === 'owner') {
+            const select = document.getElementById('auth-store-select');
+            if (select && select.children.length <= 1) {
+                select.innerHTML = '<option value="">-- Select Your Store --</option>' +
+                    allMerchants.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+            }
+            document.getElementById('auth-form-owner').style.display = 'block';
+        } else if (step === 'verify') {
+            document.getElementById('auth-form-verify').style.display = 'block';
+            document.getElementById('verify-phone-display').innerText = '+964 ' + tempAuthData.phone;
+        } else if (step === 'back') {
+            tempAuthData = null;
+            showAuthStep('choice');
+        }
+    }
+
+    window.showOwnerLogin = function () {
+        showAuthStep('owner');
+    }
+
+    // 3. Register Form Submit
+    const regForm = document.getElementById('auth-form-register');
+    if (regForm) {
+        regForm.onsubmit = async (e) => {
             e.preventDefault();
-            const name = document.getElementById('auth-name').value;
-            const phone = document.getElementById('auth-phone').value;
-            localStorage.setItem('temp_user', JSON.stringify({ name, phone, role: 'customer' }));
+            const name = document.getElementById('reg-name').value.trim();
+            const phone = document.getElementById('reg-phone').value.trim();
 
-            authForm1.style.display = 'none';
-            authForm2.style.display = 'block';
+            if (phone.length < 10) {
+                alert('Please enter a valid phone number');
+                return;
+            }
+
+            try {
+                const userExists = await checkUserExists(phone);
+                if (userExists) {
+                    alert('This phone number is already registered. Please Sign In.');
+                    showAuthStep('login');
+                    document.getElementById('login-phone').value = phone;
+                    return;
+                }
+                // Proceed to verify
+                const appVerifier = window.recaptchaVerifier;
+                signInWithPhoneNumber(auth, '+964' + phone, appVerifier)
+                    .then((confirmationResult) => {
+                        window.confirmationResult = confirmationResult;
+                        tempAuthData = { type: 'register', name, phone };
+                        showAuthStep('verify');
+                        alert('Verification code sent!');
+                    }).catch((error) => {
+                        console.error("SMS Error:", error);
+                        alert("Error sending SMS: " + error.message);
+                        window.recaptchaVerifier.render().then(function (widgetId) {
+                            grecaptcha.reset(widgetId);
+                        });
+                    });
+
+            } catch (error) {
+                console.error("Auth Error:", error);
+                alert("Error checking user. Please try again.");
+            }
         };
     }
 
-    if (authForm2) {
-        authForm2.onsubmit = (e) => {
+    // 4. Login Form Submit
+    const loginForm = document.getElementById('auth-form-login');
+    if (loginForm) {
+        loginForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const phone = document.getElementById('login-phone').value.trim();
+
+            if (phone.length < 10) {
+                alert('Please enter a valid phone number');
+                return;
+            }
+
+            try {
+                const userExists = await checkUserExists(phone);
+                if (!userExists) {
+                    if (confirm('No account found with this number. Do you want to create one?')) {
+                        showAuthStep('register');
+                        document.getElementById('reg-phone').value = phone;
+                    }
+                    return;
+                }
+                // Proceed to verify
+                const appVerifier = window.recaptchaVerifier;
+                signInWithPhoneNumber(auth, '+964' + phone, appVerifier)
+                    .then((confirmationResult) => {
+                        window.confirmationResult = confirmationResult;
+                        tempAuthData = { type: 'login', phone, userData: userExists };
+                        showAuthStep('verify');
+                        alert('Verification code sent!');
+                    }).catch((error) => {
+                        console.error("SMS Login Error:", error);
+                        alert("Error sending SMS: " + error.message);
+                    });
+            } catch (error) {
+                console.error("Auth Error:", error);
+                alert("Error logging in. Please try again.");
+            }
+        }
+    }
+
+    // 5. Owner Form Submit
+    const ownerForm = document.getElementById('auth-form-owner');
+    if (ownerForm) {
+        ownerForm.onsubmit = (e) => {
+            e.preventDefault();
+            const storeId = document.getElementById('auth-store-select').value;
+            const phone = document.getElementById('owner-phone').value;
+
+            if (!storeId) {
+                alert('Please select your store');
+                return;
+            }
+
+            const store = allMerchants.find(m => m.id === storeId);
+            tempAuthData = {
+                type: 'owner',
+                phone: phone,
+                userData: {
+                    role: 'owner',
+                    storeId: storeId,
+                    name: store.name,
+                    phone: phone
+                }
+            };
+            showAuthStep('verify');
+        }
+    }
+
+    // 6. Verification (OTP) Logic
+    const verifyForm = document.getElementById('auth-form-verify');
+    if (verifyForm) {
+        verifyForm.onsubmit = async (e) => {
             e.preventDefault();
             const code = document.getElementById('auth-code').value;
-            if (code === '123456') {
-                const user = JSON.parse(localStorage.getItem('temp_user'));
-                currentUser = user;
+
+            if (!window.confirmationResult) {
+                alert('No verification session found. Please try again.');
+                return;
+            }
+
+            try {
+                const result = await window.confirmationResult.confirm(code);
+                const user = result.user;
+                // Success!
+
+                if (tempAuthData.type === 'register') {
+                    const newUser = {
+                        name: tempAuthData.name,
+                        phone: '+964' + tempAuthData.phone,
+                        role: 'customer',
+                        createdAt: new Date().toISOString()
+                    };
+                    await setDoc(doc(db, "customers", tempAuthData.phone), newUser);
+                    currentUser = newUser;
+                    alert(`Welcome to DocBook, ${newUser.name}!`);
+                } else if (tempAuthData.type === 'login' || tempAuthData.type === 'owner') {
+                    currentUser = tempAuthData.userData;
+                    const welcomeName = currentUser.role === 'owner' ? `Owner of ${currentUser.name}` : currentUser.name;
+                    alert(`Welcome back, ${welcomeName}!`);
+                }
+
+                localStorage.setItem('currentUser', JSON.stringify(currentUser));
                 updateUIForUser();
                 authModal.style.display = 'none';
-                alert(`Welcome back, ${user.name}!`);
-            } else {
-                alert('Invalid code (use 123456)');
+
+            } catch (error) {
+                console.error("Verification Error:", error);
+                alert("Incorrect code or verification failed. Please try again.");
             }
         };
+    }
+}
+
+// Helper: Check if user exists in Firestore
+async function checkUserExists(phone) {
+    try {
+        const docRef = doc(db, "customers", phone);
+        const docSnap = await getDoc(docRef);
+        return docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } : null;
+    } catch (e) {
+        console.error("Error checking user:", e);
+        throw e;
     }
 }
 
@@ -150,6 +350,11 @@ function updateUIForUser() {
     if (profileDiv && userNameSpan) {
         profileDiv.style.display = 'block';
         userNameSpan.textContent = currentUser.name;
+    }
+
+    // Redirect if owner
+    if (currentUser.role === 'owner') {
+        loadOwnerDashboard();
     }
 }
 
@@ -1375,14 +1580,13 @@ async function loadFinancials(filter = currentFinancialFilter) {
         allBookings = generateSampleBookings();
     }
 
-    // Populate store selector for invoice generation
+    // Populate store selector for invoice generation using allMerchants
     const storeSelect = document.getElementById('invoice-store-select');
-    if (storeSelect && storeSelect.options.length <= 1) {
-        const storeNames = [...new Set(allBookings.map(b => b.storeName))];
-        storeNames.forEach(name => {
+    if (storeSelect && storeSelect.options.length <= 1 && allMerchants && allMerchants.length > 0) {
+        allMerchants.forEach(store => {
             const opt = document.createElement('option');
-            opt.value = name;
-            opt.textContent = name;
+            opt.value = store.id;
+            opt.textContent = store.name;
             storeSelect.appendChild(opt);
         });
     }
@@ -1479,6 +1683,7 @@ async function loadInvoicesFromFirestore() {
             const data = docSnap.data();
             return {
                 id: data.id,
+                storeId: data.storeId, // Added storeId
                 storeName: data.storeName,
                 period: data.period,
                 startDate: new Date(data.startDate),
@@ -1509,11 +1714,14 @@ async function loadInvoicesFromFirestore() {
 
 // Generate Store Invoice (using date range inputs)
 window.generateStoreInvoice = function () {
-    const storeName = document.getElementById('invoice-store-select').value;
+    const storeSelect = document.getElementById('invoice-store-select');
+    const storeId = storeSelect.value;
+    const storeName = storeSelect.options[storeSelect.selectedIndex].text;
+
     const startDateInput = document.getElementById('invoice-start-date').value;
     const endDateInput = document.getElementById('invoice-end-date').value;
 
-    if (!storeName) {
+    if (!storeId) {
         alert('Please select a store');
         return;
     }
@@ -1536,7 +1744,7 @@ window.generateStoreInvoice = function () {
 
     // Filter bookings for this store in the period
     const storeBookings = allBookings.filter(b =>
-        b.storeName === storeName &&
+        b.storeId === storeId &&
         b.status === 'completed' &&
         b.bookingDate >= startDate &&
         b.bookingDate <= endDate
@@ -1558,6 +1766,7 @@ window.generateStoreInvoice = function () {
     // Store current invoice data for saving
     currentInvoiceData = {
         id: invoiceNum,
+        storeId: storeId,
         storeName: storeName,
         period: periodLabel,
         startDate: startDate,
@@ -1618,6 +1827,7 @@ window.saveInvoice = async function () {
         // Convert for Firestore storage (no Date objects directly, store booking info as simplified array)
         const invoiceForFirestore = {
             id: currentInvoiceData.id,
+            storeId: currentInvoiceData.storeId, // Persist Store ID
             storeName: currentInvoiceData.storeName,
             period: currentInvoiceData.period,
             startDate: currentInvoiceData.startDate.toISOString(),
@@ -1856,6 +2066,463 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 });
+
+
+// ========== OWNER DASHBOARD FUNCTIONS ==========
+
+// Load Owner Dashboard
+window.loadOwnerDashboard = async function () {
+    if (!currentUser || currentUser.role !== 'owner') return;
+
+    // Show dev toolbar active state
+    switchDashboard('owner');
+
+    // Update Store Badge
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (store) {
+        document.getElementById('owner-store-badge').innerText = `🏪 ${store.name}`;
+    }
+
+    // Setup Owner Tab Switching
+    const tabs = document.querySelectorAll('.owner-tab');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            tabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+
+            // Hide panels
+            document.querySelectorAll('.owner-panel').forEach(p => p.style.display = 'none');
+            // Show target
+            document.getElementById(`owner-${tab.dataset.tab}`).style.display = 'block';
+
+            if (tab.dataset.tab === 'overview') loadOwnerOverview();
+            if (tab.dataset.tab === 'bookings') loadOwnerBookings('all');
+            if (tab.dataset.tab === 'mystore') loadOwnerStore();
+            if (tab.dataset.tab === 'financials') loadOwnerFinancials();
+        });
+    });
+
+    // Initial Load
+    loadOwnerOverview();
+};
+
+// 1. Overview Tab
+async function loadOwnerOverview() {
+    const storeId = currentUser.storeId;
+    if (!storeId) return;
+
+    // Fetch stats (mocked logic or real aggregation)
+    let totalRevenue = 0;
+    let todayBookingsCount = 0;
+    let pendingCount = 0;
+
+    // Logic to calculate from bookings collection would go here
+    // For now, we will just use dummy or fetch if bookings collection exists
+    // Let's assume we fetch all bookings for this merchant
+    try {
+        const q = query(collection(db, "bookings"), where("merchantId", "==", storeId));
+        const snapshot = await getDocs(q);
+        const bookings = [];
+        snapshot.forEach(d => bookings.push({ id: d.id, ...d.data() }));
+
+        const today = new Date().toDateString();
+
+        bookings.forEach(b => {
+            // Calculate Revenue
+            if (b.status === 'completed') {
+                totalRevenue += (b.price || 0);
+            }
+            // Count Today's
+            if (b.createdAt && b.createdAt.toDate().toDateString() === today) {
+                todayBookingsCount++;
+            }
+            // Count Pending
+            if (b.status === 'pending') {
+                pendingCount++;
+            }
+        });
+
+        document.getElementById('owner-stat-today').innerText = todayBookingsCount;
+        document.getElementById('owner-stat-pending').innerText = pendingCount;
+        document.getElementById('owner-stat-revenue').innerText = `${totalRevenue.toLocaleString()} IQD`;
+
+        // Populate Pending List
+        const pendingList = document.getElementById('owner-urgent-bookings-list');
+        const pendingBookings = bookings.filter(b => b.status === 'pending');
+
+        if (pendingBookings.length === 0) {
+            pendingList.innerHTML = '<div class="empty-state">No pending bookings.</div>';
+        } else {
+            pendingList.innerHTML = pendingBookings.map(b => `
+                <div class="appointment-card" style="padding: 15px; border: 1px solid #eee; margin-bottom: 10px; border-radius: 8px; border-left: 4px solid #eab308;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <strong>${b.customerName || 'Customer'}</strong> requested <strong>${b.serviceName}</strong>
+                            <div style="font-size: 0.85rem; color: #888;">${b.createdAt ? b.createdAt.toDate().toLocaleString() : ''}</div>
+                        </div>
+                        <div>
+                            <button class="btn-primary" style="padding: 4px 12px; font-size: 0.8rem;" onclick="updateBookingStatus('${b.id}', 'confirmed')">Accept</button>
+                            <button class="btn-outline" style="padding: 4px 12px; font-size: 0.8rem; border-color: #ef4444; color: #ef4444;" onclick="updateBookingStatus('${b.id}', 'cancelled')">Decline</button>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+    } catch (e) {
+        console.error("Error loading owner stats:", e);
+    }
+}
+
+// 2. Bookings Tab
+let currentBookingFilter = 'all';
+window.filterOwnerBookings = function (status) {
+    currentBookingFilter = status;
+    const btns = document.querySelectorAll('#owner-bookings .filter-btn');
+    btns.forEach(b => {
+        if (b.innerText.toLowerCase() === status || (status === 'all' && b.innerText === 'All')) {
+            b.classList.add('active');
+        } else {
+            b.classList.remove('active');
+        }
+    });
+    loadOwnerBookings(status);
+}
+
+async function loadOwnerBookings(status) {
+    const tbody = document.getElementById('owner-bookings-tbody');
+    tbody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+
+    try {
+        const q = query(collection(db, "bookings"), where("merchantId", "==", currentUser.storeId), orderBy("createdAt", "desc"));
+        const snapshot = await getDocs(q); // In real app, might need composite index
+        let bookings = [];
+        snapshot.forEach(d => bookings.push({ id: d.id, ...d.data() }));
+
+        if (status !== 'all') {
+            bookings = bookings.filter(b => b.status === status);
+        }
+
+        if (bookings.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6">No bookings found.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = bookings.map(b => `
+            <tr>
+                <td>${b.customerName}</td>
+                <td>${b.serviceName}</td>
+                <td>${b.createdAt ? b.createdAt.toDate().toLocaleString() : 'N/A'}</td>
+                <td>${b.price.toLocaleString()} IQD</td>
+                <td>
+                    <span class="status-badge ${b.status}">
+                        ${b.status.charAt(0).toUpperCase() + b.status.slice(1)}
+                    </span>
+                </td>
+                <td>
+                    ${b.status === 'pending' ? `
+                        <button class="action-btn" onclick="updateBookingStatus('${b.id}', 'confirmed')">✅ Accept</button>
+                        <button class="action-btn danger" onclick="updateBookingStatus('${b.id}', 'cancelled')">❌ Reject</button>
+                    ` : b.status === 'confirmed' ? `
+                        <button class="action-btn" onclick="updateBookingStatus('${b.id}', 'completed')">🏁 Complete</button>
+                    ` : ''}
+                </td>
+            </tr>
+        `).join('');
+
+    } catch (e) {
+        console.error("Error loading bookings:", e);
+        // Fallback if index missing
+        tbody.innerHTML = '<tr><td colspan="6">Error or Missing Index. Please check console.</td></tr>';
+    }
+}
+
+// Global action for booking status
+window.updateBookingStatus = async function (id, status) {
+    try {
+        await updateDoc(doc(db, "bookings", id), { status: status });
+        // Refresh views
+        loadOwnerOverview(); // Update stats
+        if (document.getElementById('owner-bookings').style.display !== 'none') {
+            loadOwnerBookings(currentBookingFilter);
+        }
+        alert(`Booking marked as ${status}`);
+    } catch (e) {
+        console.error(e);
+        alert('Failed to update status');
+    }
+}
+
+// 3. My Store Tab
+async function loadOwnerStore() {
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store) return;
+
+    // Populate Form
+    document.getElementById('owner-store-name').value = store.name;
+    document.getElementById('owner-store-address').value = store.address || '';
+    document.getElementById('owner-store-lat').value = store.lat || '';
+    document.getElementById('owner-store-lng').value = store.lng || '';
+
+    // Services
+    renderOwnerServices(store.services || []);
+}
+
+function renderOwnerServices(services) {
+    const list = document.getElementById('owner-services-list');
+    list.innerHTML = services.map((s, i) => `
+         <div class="sortable-item">
+            <div class="service-info">
+                <div class="service-name">${s.name}</div>
+                <div class="service-meta">${s.duration} mins • ${s.price.toLocaleString()} IQD</div>
+            </div>
+             <div class="service-actions">
+                <button type="button" class="service-action-btn edit" onclick="editOwnerService(${i})">✏️</button>
+                <button type="button" class="service-action-btn delete" onclick="deleteOwnerService(${i})">🗑️</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+window.saveOwnerStoreDetails = async function () {
+    const name = document.getElementById('owner-store-name').value;
+    const address = document.getElementById('owner-store-address').value;
+    const lat = parseFloat(document.getElementById('owner-store-lat').value);
+    const lng = parseFloat(document.getElementById('owner-store-lng').value);
+
+    // Only update these fields
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), {
+            name, address, lat, lng
+        });
+        alert('Store details updated!');
+    } catch (e) {
+        console.error(e);
+        alert('Failed to update store');
+    }
+}
+
+// 4. Financials Tab
+async function loadOwnerFinancials() {
+    const storeId = currentUser.storeId;
+    if (!storeId) return;
+
+    // 1. Calculate Total Revenue & Commission Due
+    let totalRevenue = 0;
+
+    try {
+        // Fetch bookings for revenue
+        const bookingsQ = query(collection(db, "bookings"), where("merchantId", "==", storeId));
+        const bookingSnapshot = await getDocs(bookingsQ);
+
+        bookingSnapshot.forEach(doc => {
+            const b = doc.data();
+            if (b.status === 'completed') {
+                totalRevenue += (b.price || 0);
+            }
+        });
+
+        document.getElementById('owner-fin-total').innerText = `${totalRevenue.toLocaleString()} IQD`;
+
+    } catch (e) {
+        console.error("Error calculating owner revenue:", e);
+    }
+
+    // 2. Fetch Invoices for Commission Due & History
+    try {
+        const invoicesQ = query(collection(db, "invoices"), where("storeId", "==", storeId), orderBy("createdAt", "desc"));
+        const invoiceSnapshot = await getDocs(invoicesQ);
+
+        const invoices = [];
+        let commissionDue = 0;
+
+        invoiceSnapshot.forEach(doc => {
+            const inv = { id: doc.id, ...doc.data() };
+            invoices.push(inv);
+            if (!inv.isPaid) {
+                commissionDue += (inv.commission || 0);
+            }
+        });
+
+        document.getElementById('owner-fin-due').innerText = `${commissionDue.toLocaleString()} IQD`;
+
+        // Render Invoices List
+        const invoicesList = document.getElementById('owner-invoices-list');
+        if (invoices.length === 0) {
+            invoicesList.innerHTML = '<div class="empty-state">No invoices generated by admin yet.</div>';
+        } else {
+            invoicesList.innerHTML = invoices.map(inv => `
+                <div class="invoice-card">
+                    <div class="invoice-card-info">
+                        <h4>${inv.period}</h4>
+                        <p>${inv.serviceCount} services • ${new Date(inv.createdAt).toLocaleDateString()}</p>
+                    </div>
+                    <div class="invoice-card-amount">
+                        <div class="amount">${inv.commission.toLocaleString()} IQD</div>
+                        ${inv.isPaid
+                    ? '<div class="date" style="color: green;">✓ Paid</div>'
+                    : '<div class="date" style="color: var(--primary);">Due</div>'}
+                    </div>
+                     <div class="invoice-card-actions">
+                        <button class="action-btn" onclick="viewSavedInvoice('${inv.id}')">View</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+    } catch (e) {
+        console.error("Error loading owner invoices:", e);
+        document.getElementById('owner-invoices-list').innerHTML = '<div class="empty-state">Error loading invoices. Check console.</div>';
+    }
+}
+
+// Helper for location picker in owner mode
+window.openLocationPickerForOwner = function () {
+    window.isOwnerEditing = true; // flag to differentiate
+    openLocationPicker();
+    // We reuse the same logic but need to ensure it writes back to owner inputs
+    // Override the confirm logic temporarily or handle in confirmLocationSelection
+    const originalConfirm = window.confirmLocationSelection;
+    window.confirmLocationSelection = function () {
+        if (!pickedLocation) return;
+
+        document.getElementById('owner-store-lat').value = pickedLocation.lat().toFixed(6);
+        document.getElementById('owner-store-lng').value = pickedLocation.lng().toFixed(6);
+
+        const closeBtn = document.querySelector('.close-map');
+        if (closeBtn) closeBtn.click();
+
+        // Restore
+        window.confirmLocationSelection = originalConfirm;
+    };
+}
+
+// 5. Store Photo Handling (Owner)
+const ownerPhotoFile = document.getElementById('owner-store-photo-file');
+const ownerPhotoPreview = document.getElementById('owner-store-photo-preview');
+
+if (ownerPhotoFile) {
+    ownerPhotoFile.addEventListener('change', function (e) {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                ownerPhotoPreview.src = e.target.result;
+                ownerPhotoPreview.style.display = 'block';
+            }
+            reader.readAsDataURL(file);
+        }
+    });
+}
+
+window.saveOwnerStoreDetails = async function () {
+    const name = document.getElementById('owner-store-name').value;
+    const address = document.getElementById('owner-store-address').value;
+    const lat = parseFloat(document.getElementById('owner-store-lat').value);
+    const lng = parseFloat(document.getElementById('owner-store-lng').value);
+    const photoFile = document.getElementById('owner-store-photo-file').files[0];
+
+    // Prepare Update Object
+    let updateData = { name, address, lat, lng };
+
+    try {
+        // Upload Photo if new one selected
+        if (photoFile) {
+            const storageRef = ref(storage, `stores/${currentUser.storeId}/${Date.now()}_${photoFile.name}`);
+            const snapshot = await uploadBytes(storageRef, photoFile);
+            const downloadURL = await getDownloadURL(snapshot.ref);
+            updateData.photo = downloadURL;
+        }
+
+        await updateDoc(doc(db, "merchants", currentUser.storeId), updateData);
+        alert('Store details updated successfully!');
+
+        // Refresh local store data
+        const storeIndex = allMerchants.findIndex(m => m.id === currentUser.storeId);
+        if (storeIndex >= 0) {
+            allMerchants[storeIndex] = { ...allMerchants[storeIndex], ...updateData };
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Failed to update store: ' + e.message);
+    }
+}
+
+// 6. Owner Service Management
+window.openAddServiceModalForOwner = function () {
+    window.isOwnerServiceEdit = true; // Context flag
+    document.getElementById('service-modal-title').innerText = 'Add New Service';
+    document.getElementById('service-edit-index').value = -1; // New
+    document.getElementById('service-edit-name').value = '';
+    document.getElementById('service-edit-price').value = '';
+    document.getElementById('service-edit-duration').value = '';
+
+    // Override Save Handler
+    const form = document.getElementById('service-form');
+    form.onsubmit = saveOwnerService;
+
+    document.getElementById('service-modal').style.display = 'flex';
+}
+
+window.editOwnerService = function (index) {
+    window.isOwnerServiceEdit = true;
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    const service = store.services[index];
+
+    document.getElementById('service-modal-title').innerText = 'Edit Service';
+    document.getElementById('service-edit-index').value = index;
+    document.getElementById('service-edit-name').value = service.name;
+    document.getElementById('service-edit-price').value = service.price;
+    document.getElementById('service-edit-duration').value = service.duration;
+
+    const form = document.getElementById('service-form');
+    form.onsubmit = saveOwnerService;
+
+    document.getElementById('service-modal').style.display = 'flex';
+}
+
+window.deleteOwnerService = async function (index) {
+    if (!confirm('Are you sure you want to delete this service?')) return;
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    store.services.splice(index, 1);
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { services: store.services });
+        renderOwnerServices(store.services);
+    } catch (e) {
+        alert('Error deleting service');
+    }
+}
+
+async function saveOwnerService(e) {
+    e.preventDefault();
+    const name = document.getElementById('service-edit-name').value;
+    const price = parseInt(document.getElementById('service-edit-price').value);
+    const duration = parseInt(document.getElementById('service-edit-duration').value);
+    const index = parseInt(document.getElementById('service-edit-index').value);
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store.services) store.services = [];
+
+    const newService = { name, price, duration };
+
+    if (index === -1) {
+        store.services.push(newService);
+    } else {
+        store.services[index] = newService;
+    }
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { services: store.services });
+        renderOwnerServices(store.services);
+        closeModal('service-modal');
+    } catch (e) {
+        console.error(e);
+        alert('Error saving service');
+    }
+}
+
 
 // Start
 init();

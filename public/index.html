@@ -84,22 +84,159 @@
         <div class="container">
             <div class="dashboard-header">
                 <h1>Owner Dashboard</h1>
-                <button class="btn-primary">+ Add Booking</button>
+                <div id="owner-store-badge" class="filter-chip active"
+                    style="background: var(--primary); color: white;">Loading...</div>
             </div>
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <h3>Today's Bookings</h3>
-                    <p class="stat-num">8</p>
+
+            <!-- Owner Tabs -->
+            <div class="admin-tabs">
+                <button class="owner-tab active" data-tab="overview">📊 Overview</button>
+                <button class="owner-tab" data-tab="bookings">📅 Bookings</button>
+                <button class="owner-tab" data-tab="mystore">🏪 My Store</button>
+                <button class="owner-tab" data-tab="financials">💰 Financials</button>
+            </div>
+
+            <!-- OVERVIEW TAB -->
+            <div id="owner-overview" class="owner-panel">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>Today's Bookings</h3>
+                        <p class="stat-num" id="owner-stat-today">0</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Pending Requests</h3>
+                        <p class="stat-num" id="owner-stat-pending" style="color: #eab308;">0</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Total Revenue</h3>
+                        <p class="stat-num" id="owner-stat-revenue">$0</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Rating</h3>
+                        <p class="stat-num" id="owner-stat-rating">⭐ 5.0</p>
+                    </div>
                 </div>
-                <div class="stat-card">
-                    <h3>Revenue</h3>
-                    <p class="stat-num">$450</p>
+                <div class="appointments-list">
+                    <h3>Action Required (Pending Bookings)</h3>
+                    <div id="owner-urgent-bookings-list">
+                        <div class="empty-state">No pending bookings.</div>
+                    </div>
                 </div>
             </div>
-            <div class="appointments-list">
-                <h3>Upcoming Appointments</h3>
-                <!-- Placeholder -->
-                <div class="empty-state">No upcoming appointments.</div>
+
+            <!-- BOOKINGS TAB -->
+            <div id="owner-bookings" class="owner-panel" style="display: none;">
+                <div class="panel-header">
+                    <h2>Booking Management</h2>
+                    <div class="filters">
+                        <button class="filter-btn active" onclick="filterOwnerBookings('all')">All</button>
+                        <button class="filter-btn" onclick="filterOwnerBookings('pending')">Pending</button>
+                        <button class="filter-btn" onclick="filterOwnerBookings('confirmed')">Confirmed</button>
+                        <button class="filter-btn" onclick="filterOwnerBookings('completed')">Completed</button>
+                    </div>
+                </div>
+                <div class="admin-table-container">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Customer</th>
+                                <th>Service</th>
+                                <th>Date/Time</th>
+                                <th>Price</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="owner-bookings-tbody">
+                            <!-- Loaded via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- MY STORE TAB -->
+            <div id="owner-mystore" class="owner-panel" style="display: none;">
+                <div class="panel-header">
+                    <h2>Edit Store Details</h2>
+                    <button class="btn-primary" onclick="saveOwnerStoreDetails()">💾 Save Changes</button>
+                </div>
+
+                <div class="store-edit-container"
+                    style="background: white; padding: 20px; border-radius: 12px; box-shadow: var(--shadow);">
+                    <!-- Reusing the form inputs but with different IDs for owner context -->
+                    <form id="owner-store-form" onsubmit="event.preventDefault(); saveOwnerStoreDetails();">
+                        <div class="form-group">
+                            <label>Store Name</label>
+                            <input type="text" id="owner-store-name" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Address</label>
+                            <input type="text" id="owner-store-address" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Store Photo</label>
+                            <div class="photo-upload-container">
+                                <img id="owner-store-photo-preview" src="" alt="Store Preview"
+                                    style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; display: none; margin-bottom: 10px; background: #eee;">
+                                <input type="file" id="owner-store-photo-file" accept="image/*" class="file-input">
+                                <input type="hidden" id="owner-store-photo">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Latitude</label>
+                                <input type="number" id="owner-store-lat" step="any" readonly
+                                    style="background: #f3f4f6;">
+                            </div>
+                            <div class="form-group">
+                                <label>Longitude</label>
+                                <input type="number" id="owner-store-lng" step="any" readonly
+                                    style="background: #f3f4f6;">
+                            </div>
+                            <div class="form-group" style="display: flex; align-items: flex-end;">
+                                <button type="button" class="btn-secondary" onclick="openLocationPickerForOwner()"
+                                    style="margin-bottom: 2px;">📍 Update Location</button>
+                            </div>
+                        </div>
+
+                        <!-- Services Section for Owner -->
+                        <div class="section-divider"></div>
+                        <h3>📋 Services</h3>
+                        <div id="owner-services-list" class="sortable-list">
+                            <!-- Populated via JS -->
+                        </div>
+                        <button type="button" class="btn-add-service" onclick="openAddServiceModalForOwner()">
+                            ➕ Add New Service
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- FINANCIALS TAB -->
+            <div id="owner-financials" class="owner-panel" style="display: none;">
+                <div class="panel-header">
+                    <h2>Financial Overview</h2>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>Total Earnings</h3>
+                        <p class="stat-num" id="owner-fin-total">0 IQD</p>
+                        <span class="stat-trend">Gross Revenue</span>
+                    </div>
+                    <div class="stat-card highlight">
+                        <h3>Commission Due</h3>
+                        <p class="stat-num" id="owner-fin-due">0 IQD</p>
+                        <span class="stat-trend">To Platform (10%)</span>
+                    </div>
+                </div>
+
+                <div class="invoices-section">
+                    <h3>📄 Invoices from DocBook</h3>
+                    <div id="owner-invoices-list" class="invoices-list">
+                        <!-- Loaded via JS -->
+                        <div class="empty-state">No invoices yet.</div>
+                    </div>
+                </div>
             </div>
         </div>
     </main>
@@ -304,30 +441,109 @@
     <!-- AUTH MODAL -->
     <div id="auth-modal" class="modal">
         <div class="modal-content auth-box">
-            <span class="close">&times;</span>
-            <h2>Welcome to DocBook</h2>
-            <p>Sign in or create an account</p>
+            <span class="close" onclick="closeModal('auth-modal')">&times;</span>
 
-            <form id="auth-form-step-1">
+            <!-- HEADER -->
+            <div id="auth-header" style="text-align: center; margin-bottom: 20px;">
+                <h2>Welcome to DocBook</h2>
+                <p id="auth-subtitle" style="color: #666; font-size: 0.95rem;">Join the platform beauty lovers trust.
+                </p>
+            </div>
+
+            <!-- STEP 0: CHOICE -->
+            <div id="auth-step-0">
+                <p style="text-align: center; margin-bottom: 20px; font-weight: 500; font-size: 1.1rem;">
+                    It is very easy and very fast to create an account! 🚀
+                </p>
+                <div style="display: flex; flex-direction: column; gap: 12px;">
+                    <button class="btn-primary full-width" onclick="showAuthStep('register')">Create New
+                        Account</button>
+                    <button class="btn-outline full-width" onclick="showAuthStep('login')">Sign In</button>
+                </div>
+
+            </div>
+
+            <!-- STEP 1: REGISTER -->
+            <form id="auth-form-register" style="display: none;">
+                <h3 style="margin-bottom: 15px;">Create Account</h3>
                 <div class="form-group">
-                    <label>Name</label>
-                    <input type="text" id="auth-name" placeholder="Your Name" required>
+                    <label>Full Name</label>
+                    <input type="text" id="reg-name" placeholder="Enter your full name" required>
                 </div>
                 <div class="form-group">
                     <label>Phone Number</label>
-                    <input type="tel" id="auth-phone" placeholder="+964 750 ..." required>
+                    <div class="phone-input-group"
+                        style="display: flex; align-items: center; border: 1px solid #ddd; border-radius: 8px; padding: 2px 10px;">
+                        <span style="font-weight: 600; color: #333; margin-right: 8px;">🇮🇶 +964</span>
+                        <input type="tel" id="reg-phone" placeholder="750xxxxxxx" required
+                            style="border: none; outline: none; flex: 1; padding: 10px 0;">
+                    </div>
                 </div>
-                <div id="recaptcha-container"></div>
-                <button type="submit" class="btn-primary full-width">Send Code</button>
+                <button type="submit" class="btn-primary full-width">Send Verification Code</button>
+                <p style="text-align: center; margin-top: 15px; font-size: 0.9rem;">
+                    Already have an account? <a href="#" onclick="showAuthStep('login')">Sign In</a>
+                </p>
             </form>
 
-            <form id="auth-form-step-2" style="display: none;">
+            <!-- STEP 1: LOGIN -->
+            <form id="auth-form-login" style="display: none;">
+                <h3 style="margin-bottom: 15px;">Sign In</h3>
+                <div class="form-group">
+                    <label>Phone Number</label>
+                    <div class="phone-input-group"
+                        style="display: flex; align-items: center; border: 1px solid #ddd; border-radius: 8px; padding: 2px 10px;">
+                        <span style="font-weight: 600; color: #333; margin-right: 8px;">🇮🇶 +964</span>
+                        <input type="tel" id="login-phone" placeholder="750xxxxxxx" required
+                            style="border: none; outline: none; flex: 1; padding: 10px 0;">
+                    </div>
+                </div>
+                <button type="submit" class="btn-primary full-width">Send Verification Code</button>
+                <p style="text-align: center; margin-top: 15px; font-size: 0.9rem;">
+                    Don't have an account? <a href="#" onclick="showAuthStep('register')">Register</a>
+                </p>
+            </form>
+
+            <!-- STEP 1: OWNER LOGIN (Hidden by default) -->
+            <form id="auth-form-owner" style="display: none;">
+                <h3 style="margin-bottom: 15px;">Owner Login</h3>
+                <div class="form-group">
+                    <label>Select Your Store</label>
+                    <select id="auth-store-select">
+                        <option value="">-- Select Store --</option>
+                        <!-- Populated via JS -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Phone Number</label>
+                    <div class="phone-input-group"
+                        style="display: flex; align-items: center; border: 1px solid #ddd; border-radius: 8px; padding: 2px 10px;">
+                        <span style="font-weight: 600; color: #333; margin-right: 8px;">🇮🇶 +964</span>
+                        <input type="tel" id="owner-phone" placeholder="750xxxxxxx" required
+                            style="border: none; outline: none; flex: 1; padding: 10px 0;">
+                    </div>
+                </div>
+                <button type="submit" class="btn-primary full-width">Login as Owner</button>
+                <p style="text-align: center; margin-top: 15px; font-size: 0.9rem;">
+                    <a href="#" onclick="showAuthStep('choice')">Back to Main Login</a>
+                </p>
+            </form>
+
+            <div id="recaptcha-container"></div>
+
+            <!-- STEP 2: VERIFICATION -->
+            <form id="auth-form-verify" style="display: none;">
+                <h3 style="margin-bottom: 15px;">Verify Phone</h3>
+                <p style="font-size: 0.9rem; color: #666; margin-bottom: 15px;">
+                    Enter the code sent to <strong id="verify-phone-display">...</strong>
+                </p>
                 <div class="form-group">
                     <label>Verification Code</label>
-                    <input type="text" id="auth-code" placeholder="123456" required>
+                    <input type="text" id="auth-code" placeholder="123456"
+                        style="text-align: center; letter-spacing: 5px; font-size: 1.2rem;" required>
                 </div>
-                <button type="submit" class="btn-primary full-width">Verify</button>
-                <button type="button" id="back-step-1" class="btn-link">Back</button>
+                <button type="submit" class="btn-primary full-width">Verify & Proceed</button>
+                <button type="button" onclick="showAuthStep('back')" class="btn-link" style="margin-top: 10px;">Change
+                    Phone Number</button>
             </form>
         </div>
     </div>
