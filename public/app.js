@@ -628,6 +628,50 @@ function addMarkersToMap() {
     });
 }
 
+window.confirmRealBooking = async function (storeId, storeName, serviceName, price, duration) {
+    if (!currentUser) {
+        showToast("Please login first to book an appointment.", 'error');
+        document.getElementById('booking-modal').style.display = 'none';
+        document.getElementById('auth-modal').style.display = 'flex'; // Assuming auth-modal is the login modal
+        return;
+    }
+
+    if (!await showConfirm(`Confirm booking for ${serviceName} at ${storeName} for ${price.toLocaleString()} IQD?`)) {
+        return;
+    }
+
+    try {
+        const bookingData = {
+            userId: currentUser.id || currentUser.phone, // fallback to phone if id missing
+            customerName: currentUser.name,
+            customerPhone: currentUser.phone,
+            storeId: storeId,
+            storeName: storeName,
+            serviceName: serviceName,
+            servicePrice: price,
+            serviceDuration: duration,
+            bookingDate: new Date(), // Current time for now
+            status: 'completed', // Auto-complete for MVP
+            commission: Math.round(price * 0.1),
+            createdAt: new Date().toISOString()
+        };
+
+        await addDoc(collection(db, 'bookings'), bookingData);
+
+        showToast('Booking Confirmed! ✅', 'success');
+        document.getElementById('booking-modal').style.display = 'none';
+
+        // Refresh dashboard if admin is viewing
+        if (currentUser.role === 'admin') {
+            loadFinancials();
+        }
+
+    } catch (e) {
+        console.error("Booking Error:", e);
+        showToast("Failed to book service.", 'error');
+    }
+}
+
 // Show specific merchant on map
 window.showOnMap = function (id) {
     const merchant = allMerchants.find(m => m.id === id);
@@ -702,7 +746,7 @@ window.openMerchantDetails = function (id) {
                     `}
                 </div>
                 <button class="btn-outline" style="padding: 4px 12px; font-size: 0.8rem;" 
-                    onclick="initiateBooking('${merchant.id}', '${s.name}', ${newPrice})">Book</button>
+                    onclick="confirmRealBooking('${merchant.id}', '${merchant.name}', '${s.name}', ${newPrice}, ${s.duration})">Book</button>
             </div>
         </div>
     `}).join('') : '<p>No services listed.</p>';
@@ -1629,41 +1673,7 @@ let allBookings = [];
 let currentFinancialFilter = 'all';
 
 // Sample booking data for demo purposes
-function generateSampleBookings() {
-    const stores = allMerchants.slice(0, 10);
-    const services = ['Haircut & Style', 'Full Hair Coloring', 'Manicure & Pedicure', 'Premium Shave', 'Facial Treatment', 'Massage Therapy', 'Brow Threading', 'Lash Extensions'];
-    const statuses = ['completed', 'completed', 'completed', 'pending'];
 
-    const bookings = [];
-    const now = new Date();
-
-    for (let i = 0; i < 25; i++) {
-        const store = stores[i % stores.length];
-        if (!store) continue;
-
-        const daysAgo = Math.floor(Math.random() * 45);
-        const bookingDate = new Date(now);
-        bookingDate.setDate(bookingDate.getDate() - daysAgo);
-
-        const price = [15000, 25000, 35000, 45000, 60000, 75000][Math.floor(Math.random() * 6)];
-        const status = statuses[Math.floor(Math.random() * statuses.length)];
-
-        bookings.push({
-            id: `booking-${i}`,
-            storeId: store.id,
-            storeName: store.name,
-            serviceName: services[Math.floor(Math.random() * services.length)],
-            servicePrice: price,
-            customerName: ['Ahmed', 'Sara', 'Omar', 'Layla', 'Hassan', 'Noor'][Math.floor(Math.random() * 6)],
-            bookingDate: bookingDate,
-            status: status,
-            paymentStatus: status === 'completed' ? 'paid' : 'pending',
-            commission: Math.round(price * 0.1)
-        });
-    }
-
-    return bookings.sort((a, b) => b.bookingDate - a.bookingDate);
-}
 
 // Load Financials
 async function loadFinancials(filter = currentFinancialFilter) {
@@ -1672,9 +1682,20 @@ async function loadFinancials(filter = currentFinancialFilter) {
     // Load invoices from Firestore
     await loadInvoicesFromFirestore();
 
-    // Generate sample data if not already loaded
-    if (allBookings.length === 0) {
-        allBookings = generateSampleBookings();
+    // Load Bookings from Firestore (Real Data)
+    if (currentUser.role === 'admin') {
+        const q = query(collection(db, "bookings"), orderBy("bookingDate", "desc"));
+        const snapshot = await getDocs(q);
+
+        allBookings = [];
+        snapshot.forEach(docSnap => {
+            const data = docSnap.data();
+            allBookings.push({
+                id: docSnap.id,
+                ...data,
+                bookingDate: data.bookingDate.toDate ? data.bookingDate.toDate() : new Date(data.bookingDate)
+            });
+        });
     }
 
     // Populate store selector for invoice generation using allMerchants
