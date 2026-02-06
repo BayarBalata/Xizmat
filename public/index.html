@@ -24,10 +24,29 @@
                 <button id="map-btn" class="btn-outline"
                     style="background: linear-gradient(135deg, #f3e8ff, #e0aaff); border: none;">📍 Map</button>
                 <button id="login-btn" class="btn-outline">Login</button>
-                <div id="user-profile" style="display: none; align-items: center; gap: 10px;">
+                <div id="user-profile" class="user-dropdown-container"
+                    style="display: none; align-items: center; gap: 8px;" onclick="toggleUserDropdown()">
                     <span id="user-name" style="font-weight: 500;"></span>
-                    <button onclick="handleLogout()" class="btn-link"
-                        style="color: #666; font-size: 0.9rem;">Logout</button>
+                    <span style="font-size: 0.8rem;">▼</span>
+
+                    <div id="user-dropdown-menu" class="dropdown-menu">
+                        <!-- Dark Mode Toggle -->
+                        <div class="dropdown-item" onclick="event.stopPropagation()">
+                            <span>Dark Mode</span>
+                            <label class="theme-switch-wrapper">
+                                <label class="theme-switch" for="checkbox-dark-mode">
+                                    <input type="checkbox" id="checkbox-dark-mode" onchange="toggleDarkMode()">
+                                    <div class="slider round"></div>
+                                </label>
+                            </label>
+                        </div>
+
+                        <!-- Logout -->
+                        <div class="dropdown-item danger" onclick="handleLogout()">
+                            <span>Logout</span>
+                            <span>🚪</span>
+                        </div>
+                    </div>
                 </div>
             </nav>
         </div>
