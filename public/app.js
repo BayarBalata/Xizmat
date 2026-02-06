@@ -108,298 +108,299 @@ async function loadOffersData() {
     } catch (error) {
         console.error('Error loading offers:', error);
     }
+}
 
 
-    // ========== UI POLISH (Dark Mode & Dropdown) ==========
+// ========== UI POLISH (Dark Mode & Dropdown) ==========
 
-    function initDarkMode() {
-        const isDark = localStorage.getItem('theme') === 'dark';
-        if (isDark) {
-            document.body.classList.add('dark-mode');
-            document.getElementById('checkbox-dark-mode').checked = true;
+function initDarkMode() {
+    const isDark = localStorage.getItem('theme') === 'dark';
+    if (isDark) {
+        document.body.classList.add('dark-mode');
+        document.getElementById('checkbox-dark-mode').checked = true;
+    }
+}
+
+window.toggleDarkMode = function () {
+    const isDark = document.body.classList.toggle('dark-mode');
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    document.getElementById('checkbox-dark-mode').checked = isDark;
+}
+
+window.toggleUserDropdown = function () {
+    const menu = document.getElementById('user-dropdown-menu');
+    menu.classList.toggle('show');
+    event.stopPropagation(); // Prevent immediate closing
+}
+
+// Close dropdown when clicking outside
+window.addEventListener('click', (e) => {
+    const menu = document.getElementById('user-dropdown-menu');
+    if (menu && menu.classList.contains('show')) {
+        // If click is NOT inside the dropdown container
+        if (!e.target.closest('#user-profile')) {
+            menu.classList.remove('show');
         }
     }
+});
 
-    window.toggleDarkMode = function () {
-        const isDark = document.body.classList.toggle('dark-mode');
-        localStorage.setItem('theme', isDark ? 'dark' : 'light');
-        document.getElementById('checkbox-dark-mode').checked = isDark;
-    }
+function setupEventListeners() {
+    // Dashboard Switching
 
-    window.toggleUserDropdown = function () {
-        const menu = document.getElementById('user-dropdown-menu');
-        menu.classList.toggle('show');
-        event.stopPropagation(); // Prevent immediate closing
-    }
 
-    // Close dropdown when clicking outside
-    window.addEventListener('click', (e) => {
-        const menu = document.getElementById('user-dropdown-menu');
-        if (menu && menu.classList.contains('show')) {
-            // If click is NOT inside the dropdown container
-            if (!e.target.closest('#user-profile')) {
-                menu.classList.remove('show');
-            }
-        }
+    // Login Modal
+
+
+    // Close Modals
+    document.querySelectorAll('.close, .close-booking').forEach(btn => {
+        btn.onclick = () => {
+            authModal.style.display = 'none';
+            bookingModal.style.display = 'none';
+        };
     });
 
-    function setupEventListeners() {
-        // Dashboard Switching
+    // Close Map Modal
+    const closeMapBtn = document.querySelector('.close-map');
+    if (closeMapBtn) {
+        closeMapBtn.onclick = () => {
+            mapModal.style.display = 'none';
+            // Reset Pick State
+            isPickingLocation = false;
+            if (pickerMarker) pickerMarker.setMap(null);
+            document.getElementById('btn-confirm-location').style.display = 'none';
+            const header = document.querySelector('.map-header h2');
+            if (header) header.innerText = '📍 Explore Stores in Erbil';
+        };
+    }
 
-
-        // Login Modal
-
-
-        // Close Modals
-        document.querySelectorAll('.close, .close-booking').forEach(btn => {
-            btn.onclick = () => {
-                authModal.style.display = 'none';
-                bookingModal.style.display = 'none';
-            };
-        });
-
-        // Close Map Modal
-        const closeMapBtn = document.querySelector('.close-map');
-        if (closeMapBtn) {
-            closeMapBtn.onclick = () => {
-                mapModal.style.display = 'none';
-                // Reset Pick State
-                isPickingLocation = false;
-                if (pickerMarker) pickerMarker.setMap(null);
-                document.getElementById('btn-confirm-location').style.display = 'none';
-                const header = document.querySelector('.map-header h2');
-                if (header) header.innerText = '📍 Explore Stores in Erbil';
-            };
-        }
-
-        // Map Button
-        if (mapBtn) {
-            mapBtn.onclick = () => {
-                mapModal.style.display = 'flex';
-                if (!map) {
-                    initMap();
-                } else {
-                    // Refresh markers in case data changed
-                    addMarkersToMap();
-                }
-            };
-        }
-
-        // Filters
-        filterChips.forEach(chip => {
-            chip.addEventListener('click', () => {
-                filterChips.forEach(c => c.classList.remove('active'));
-                chip.classList.add('active');
-                currentFilter = chip.dataset.type;
-                renderMerchants();
-            });
-        });
-
-
-        // Authentication Logic
-
-
-        // AUTHENTICATION LOGIC (Redesigned)
-        let authStep = 'choice';
-        let tempAuthData = null;
-
-
-        // 1. Initialize ReCAPTCHA
-        if (!window.recaptchaVerifier) {
-            window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-                'size': 'invisible',
-                'callback': (response) => {
-                    // reCAPTCHA solved, allow signInWithPhoneNumber.
-                    // onSignInSubmit(); 
-                }
-            });
-        }
-
-        // 2. Open Auth Modal
-        if (loginBtn) {
-            loginBtn.addEventListener('click', () => {
-                authModal.style.display = 'flex';
-                showAuthStep('choice');
-            });
-        }
-
-        // 2. Step Switching Logic
-        window.showAuthStep = function (step) {
-            authStep = step;
-            // Hide all
-            document.getElementById('auth-step-0').style.display = 'none';
-            document.getElementById('auth-form-register').style.display = 'none';
-            document.getElementById('auth-form-login').style.display = 'none';
-            document.getElementById('auth-form-owner').style.display = 'none';
-            document.getElementById('auth-form-verify').style.display = 'none';
-
-            // Show target
-            if (step === 'choice') {
-                document.getElementById('auth-step-0').style.display = 'block';
-            } else if (step === 'register') {
-                document.getElementById('auth-form-register').style.display = 'block';
-            } else if (step === 'login') {
-                document.getElementById('auth-form-login').style.display = 'block';
-            } else if (step === 'verify') {
-                document.getElementById('auth-form-verify').style.display = 'block';
-                document.getElementById('verify-phone-display').innerText = '+964 ' + tempAuthData.phone;
-            } else if (step === 'back') {
-                tempAuthData = null;
-                showAuthStep('choice');
+    // Map Button
+    if (mapBtn) {
+        mapBtn.onclick = () => {
+            mapModal.style.display = 'flex';
+            if (!map) {
+                initMap();
+            } else {
+                // Refresh markers in case data changed
+                addMarkersToMap();
             }
+        };
+    }
+
+    // Filters
+    filterChips.forEach(chip => {
+        chip.addEventListener('click', () => {
+            filterChips.forEach(c => c.classList.remove('active'));
+            chip.classList.add('active');
+            currentFilter = chip.dataset.type;
+            renderMerchants();
+        });
+    });
+
+
+    // Authentication Logic
+
+
+    // AUTHENTICATION LOGIC (Redesigned)
+    let authStep = 'choice';
+    let tempAuthData = null;
+
+
+    // 1. Initialize ReCAPTCHA
+    if (!window.recaptchaVerifier) {
+        window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+            'size': 'invisible',
+            'callback': (response) => {
+                // reCAPTCHA solved, allow signInWithPhoneNumber.
+                // onSignInSubmit(); 
+            }
+        });
+    }
+
+    // 2. Open Auth Modal
+    if (loginBtn) {
+        loginBtn.addEventListener('click', () => {
+            authModal.style.display = 'flex';
+            showAuthStep('choice');
+        });
+    }
+
+    // 2. Step Switching Logic
+    window.showAuthStep = function (step) {
+        authStep = step;
+        // Hide all
+        document.getElementById('auth-step-0').style.display = 'none';
+        document.getElementById('auth-form-register').style.display = 'none';
+        document.getElementById('auth-form-login').style.display = 'none';
+        document.getElementById('auth-form-owner').style.display = 'none';
+        document.getElementById('auth-form-verify').style.display = 'none';
+
+        // Show target
+        if (step === 'choice') {
+            document.getElementById('auth-step-0').style.display = 'block';
+        } else if (step === 'register') {
+            document.getElementById('auth-form-register').style.display = 'block';
+        } else if (step === 'login') {
+            document.getElementById('auth-form-login').style.display = 'block';
+        } else if (step === 'verify') {
+            document.getElementById('auth-form-verify').style.display = 'block';
+            document.getElementById('verify-phone-display').innerText = '+964 ' + tempAuthData.phone;
+        } else if (step === 'back') {
+            tempAuthData = null;
+            showAuthStep('choice');
         }
+    }
 
-        // 3. Register Form Submit
-        const regForm = document.getElementById('auth-form-register');
-        if (regForm) {
-            regForm.onsubmit = async (e) => {
-                e.preventDefault();
-                const name = document.getElementById('reg-name').value.trim();
-                const phone = document.getElementById('reg-phone').value.trim();
-                const password = document.getElementById('reg-password').value;
+    // 3. Register Form Submit
+    const regForm = document.getElementById('auth-form-register');
+    if (regForm) {
+        regForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('reg-name').value.trim();
+            const phone = document.getElementById('reg-phone').value.trim();
+            const password = document.getElementById('reg-password').value;
 
-                if (phone.length < 10) {
-                    showToast('Please enter a valid phone number', 'error');
+            if (phone.length < 10) {
+                showToast('Please enter a valid phone number', 'error');
+                return;
+            }
+            if (password.length < 6) {
+                showToast('Password must be at least 6 characters', 'error');
+                return;
+            }
+
+            try {
+                const userExists = await checkUserExists(phone);
+                if (userExists) {
+                    showToast('This phone number is already registered. Please Sign In.', 'info');
+                    showAuthStep('login');
+                    document.getElementById('login-phone').value = phone;
                     return;
                 }
-                if (password.length < 6) {
-                    showToast('Password must be at least 6 characters', 'error');
-                    return;
-                }
-
-                try {
-                    const userExists = await checkUserExists(phone);
-                    if (userExists) {
-                        showToast('This phone number is already registered. Please Sign In.', 'info');
-                        showAuthStep('login');
-                        document.getElementById('login-phone').value = phone;
-                        return;
-                    }
-                    // Proceed to verify
-                    const appVerifier = window.recaptchaVerifier;
-                    // OTP Step is ONLY for registration
-                    signInWithPhoneNumber(auth, '+964' + phone, appVerifier)
-                        .then((confirmationResult) => {
-                            window.confirmationResult = confirmationResult;
-                            tempAuthData = { type: 'register', name, phone, password };
-                            showAuthStep('verify');
-                            showToast('Verification code sent!', 'success');
-                        }).catch((error) => {
-                            console.error("SMS Error:", error);
-                            showToast("Error sending SMS: " + error.message, 'error');
-                            window.recaptchaVerifier.render().then(function (widgetId) {
-                                grecaptcha.reset(widgetId);
-                            });
+                // Proceed to verify
+                const appVerifier = window.recaptchaVerifier;
+                // OTP Step is ONLY for registration
+                signInWithPhoneNumber(auth, '+964' + phone, appVerifier)
+                    .then((confirmationResult) => {
+                        window.confirmationResult = confirmationResult;
+                        tempAuthData = { type: 'register', name, phone, password };
+                        showAuthStep('verify');
+                        showToast('Verification code sent!', 'success');
+                    }).catch((error) => {
+                        console.error("SMS Error:", error);
+                        showToast("Error sending SMS: " + error.message, 'error');
+                        window.recaptchaVerifier.render().then(function (widgetId) {
+                            grecaptcha.reset(widgetId);
                         });
+                    });
 
-                } catch (error) {
-                    console.error("Auth Error:", error);
-                    showToast("Error checking user. Please try again.", 'error');
-                }
-            };
-        }
-
-        // 4. Login Form Submit (Password Based)
-        const loginForm = document.getElementById('auth-form-login');
-        if (loginForm) {
-            loginForm.onsubmit = async (e) => {
-                e.preventDefault();
-                const phone = document.getElementById('login-phone').value.trim();
-                const password = document.getElementById('login-password').value;
-
-                if (phone.length < 10) {
-                    showToast('Please enter a valid phone number', 'error');
-                    return;
-                }
-
-                try {
-                    // Login with Dummy Email
-                    const email = phone + '@docbook.app';
-                    await signInWithEmailAndPassword(auth, email, password);
-
-                    // Fetch User Data from Firestore
-                    const userDoc = await checkUserExists(phone);
-
-                    if (userDoc) {
-                        currentUser = userDoc;
-                        showToast('Welcome back, ' + currentUser.name + '!', 'success');
-                        localStorage.setItem('currentUser', JSON.stringify(currentUser));
-                        updateUIForUser();
-                        authModal.style.display = 'none';
-                    } else {
-                        showToast('Account data not found.', 'error');
-                    }
-
-                } catch (error) {
-                    console.error("Login Error:", error);
-                    if (error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password') {
-                        showToast("Invalid phone number or password.", 'error');
-                    } else {
-                        showToast("Error logging in: " + error.message, 'error');
-                    }
-                }
+            } catch (error) {
+                console.error("Auth Error:", error);
+                showToast("Error checking user. Please try again.", 'error');
             }
-        }
+        };
+    }
 
+    // 4. Login Form Submit (Password Based)
+    const loginForm = document.getElementById('auth-form-login');
+    if (loginForm) {
+        loginForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const phone = document.getElementById('login-phone').value.trim();
+            const password = document.getElementById('login-password').value;
 
+            if (phone.length < 10) {
+                showToast('Please enter a valid phone number', 'error');
+                return;
+            }
 
-        // 6. Verification (OTP) Logic - Registration ONLY
-        const verifyForm = document.getElementById('auth-form-verify');
-        if (verifyForm) {
-            verifyForm.onsubmit = async (e) => {
-                e.preventDefault();
-                const code = document.getElementById('auth-code').value;
+            try {
+                // Login with Dummy Email
+                const email = phone + '@docbook.app';
+                await signInWithEmailAndPassword(auth, email, password);
 
-                if (!window.confirmationResult) {
-                    showToast('No verification session found.', 'error');
-                    return;
-                }
+                // Fetch User Data from Firestore
+                const userDoc = await checkUserExists(phone);
 
-                if (!tempAuthData || tempAuthData.type !== 'register') {
-                    showToast('Invalid session state.', 'error');
-                    return;
-                }
-
-                try {
-                    // Verify OTP
-                    await window.confirmationResult.confirm(code);
-
-                    // OTP Success - Now create Real Account
-                    await signOut(auth); // Sign out of the temporary phone session
-
-                    const dummyEmail = tempAuthData.phone + '@docbook.app';
-                    await createUserWithEmailAndPassword(auth, dummyEmail, tempAuthData.password);
-
-                    // Create Firestore Doc
-                    const newUser = {
-                        name: tempAuthData.name,
-                        phone: tempAuthData.phone,
-                        role: 'customer',
-                        createdAt: new Date().toISOString()
-                    };
-
-                    await setDoc(doc(db, "users", tempAuthData.phone), newUser);
-
-                    currentUser = newUser;
-                    showToast(`Welcome to DocBook, ${newUser.name}!`, 'success');
-
+                if (userDoc) {
+                    currentUser = userDoc;
+                    showToast('Welcome back, ' + currentUser.name + '!', 'success');
                     localStorage.setItem('currentUser', JSON.stringify(currentUser));
                     updateUIForUser();
                     authModal.style.display = 'none';
-
-                } catch (error) {
-                    console.error("Verification Error:", error);
-                    if (error.code === 'auth/email-already-in-use') {
-                        showToast("Account already exists. Please login.", 'error');
-                        showAuthStep('login');
-                    } else {
-                        showToast("Verification failed: " + error.message, 'error');
-                    }
+                } else {
+                    showToast('Account data not found.', 'error');
                 }
-            };
+
+            } catch (error) {
+                console.error("Login Error:", error);
+                if (error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password') {
+                    showToast("Invalid phone number or password.", 'error');
+                } else {
+                    showToast("Error logging in: " + error.message, 'error');
+                }
+            }
         }
     }
+
+
+
+    // 6. Verification (OTP) Logic - Registration ONLY
+    const verifyForm = document.getElementById('auth-form-verify');
+    if (verifyForm) {
+        verifyForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const code = document.getElementById('auth-code').value;
+
+            if (!window.confirmationResult) {
+                showToast('No verification session found.', 'error');
+                return;
+            }
+
+            if (!tempAuthData || tempAuthData.type !== 'register') {
+                showToast('Invalid session state.', 'error');
+                return;
+            }
+
+            try {
+                // Verify OTP
+                await window.confirmationResult.confirm(code);
+
+                // OTP Success - Now create Real Account
+                await signOut(auth); // Sign out of the temporary phone session
+
+                const dummyEmail = tempAuthData.phone + '@docbook.app';
+                await createUserWithEmailAndPassword(auth, dummyEmail, tempAuthData.password);
+
+                // Create Firestore Doc
+                const newUser = {
+                    name: tempAuthData.name,
+                    phone: tempAuthData.phone,
+                    role: 'customer',
+                    createdAt: new Date().toISOString()
+                };
+
+                await setDoc(doc(db, "users", tempAuthData.phone), newUser);
+
+                currentUser = newUser;
+                showToast(`Welcome to DocBook, ${newUser.name}!`, 'success');
+
+                localStorage.setItem('currentUser', JSON.stringify(currentUser));
+                updateUIForUser();
+                authModal.style.display = 'none';
+
+            } catch (error) {
+                console.error("Verification Error:", error);
+                if (error.code === 'auth/email-already-in-use') {
+                    showToast("Account already exists. Please login.", 'error');
+                    showAuthStep('login');
+                } else {
+                    showToast("Verification failed: " + error.message, 'error');
+                }
+            }
+        };
+    }
 }
+
 
 // Helper: Check if user exists in Firestore
 async function checkUserExists(phone) {
