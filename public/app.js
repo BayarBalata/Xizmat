@@ -112,15 +112,7 @@ async function loadOffersData() {
 
 function setupEventListeners() {
     // Dashboard Switching
-    window.switchDashboard = (role) => {
-        document.querySelectorAll('main').forEach(el => el.style.display = 'none');
-        document.getElementById(`dashboard-${role}`).style.display = 'block';
 
-        document.querySelectorAll('.dev-btn').forEach(btn => btn.classList.remove('active'));
-        const btns = Array.from(document.querySelectorAll('.dev-btn'));
-        const targetBtn = btns.find(b => b.innerText.toLowerCase().includes(role));
-        if (targetBtn) targetBtn.classList.add('active');
-    };
 
     // Login Modal
 
@@ -353,7 +345,7 @@ function setupEventListeners() {
                     createdAt: new Date().toISOString()
                 };
 
-                await setDoc(doc(db, "customers", tempAuthData.phone), newUser);
+                await setDoc(doc(db, "users", tempAuthData.phone), newUser);
 
                 currentUser = newUser;
                 showToast(`Welcome to DocBook, ${newUser.name}!`, 'success');
@@ -378,7 +370,7 @@ function setupEventListeners() {
 // Helper: Check if user exists in Firestore
 async function checkUserExists(phone) {
     try {
-        const docRef = doc(db, "customers", phone);
+        const docRef = doc(db, "users", phone);
         const docSnap = await getDoc(docRef);
         return docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } : null;
     } catch (e) {
@@ -393,13 +385,35 @@ function updateUIForUser() {
     const profileDiv = document.getElementById('user-profile');
     const userNameSpan = document.getElementById('user-name');
     if (profileDiv && userNameSpan) {
-        profileDiv.style.display = 'block';
+        profileDiv.style.display = 'flex'; // Changed to flex for alignment
         userNameSpan.textContent = currentUser.name;
     }
 
-    // Redirect if owner
+    // Redirect logic based on role
     if (currentUser.role === 'owner') {
         loadOwnerDashboard();
+    } else if (currentUser.role === 'admin') {
+        loadAdminDashboard();
+    } else {
+        // Customer - Ensure customer view is shown and others hidden
+        const custDash = document.getElementById('dashboard-customer');
+        const ownerDash = document.getElementById('dashboard-owner');
+        const adminDash = document.getElementById('dashboard-admin');
+
+        if (custDash) custDash.style.display = 'block';
+        if (ownerDash) ownerDash.style.display = 'none';
+        if (adminDash) adminDash.style.display = 'none';
+    }
+}
+
+window.handleLogout = async function () {
+    try {
+        await signOut(auth);
+        currentUser = null;
+        localStorage.removeItem('currentUser');
+        window.location.reload(); // Simple reload to clear state
+    } catch (error) {
+        console.error("Logout Error:", error);
     }
 }
 
@@ -2100,6 +2114,19 @@ window.markInvoicePaid = function () {
 
 // ========== USER MANAGEMENT FUNCTIONS ==========
 
+// Load Admin Dashboard
+window.loadAdminDashboard = async function () {
+    if (!currentUser || currentUser.role !== 'admin') return;
+
+    // Show dashboard
+    document.getElementById('dashboard-customer').style.display = 'none';
+    document.getElementById('dashboard-owner').style.display = 'none';
+    document.getElementById('dashboard-admin').style.display = 'block';
+
+    // Load initial data
+    loadAdminUsers();
+}
+
 let allUsers = [];
 let currentUserFilter = 'all';
 
@@ -2126,7 +2153,7 @@ async function loadAdminUsers() {
 
     try {
         // Optimisation: Limit to 50 or paginated in real app
-        const snapshot = await getDocs(collection(db, "customers"));
+        const snapshot = await getDocs(collection(db, "users"));
         allUsers = [];
         snapshot.forEach(docSnap => {
             allUsers.push({ id: docSnap.id, ...docSnap.data() }); // id is phone usually
@@ -2249,7 +2276,7 @@ document.getElementById('user-role-form')?.addEventListener('submit', async (e) 
             updateData.storeId = null;
         }
 
-        const userRef = doc(db, "customers", userId);
+        const userRef = doc(db, "users", userId);
         await updateDoc(userRef, updateData);
 
         // Update local state
@@ -2293,8 +2320,9 @@ document.addEventListener('DOMContentLoaded', () => {
 window.loadOwnerDashboard = async function () {
     if (!currentUser || currentUser.role !== 'owner') return;
 
-    // Show dev toolbar active state
-    switchDashboard('owner');
+    // Show dashboard
+    document.getElementById('dashboard-customer').style.display = 'none';
+    document.getElementById('dashboard-owner').style.display = 'block';
 
     // Update Store Badge
     const store = allMerchants.find(m => m.id === currentUser.storeId);

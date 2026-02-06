@@ -15,14 +15,6 @@
 </head>
 
 <body>
-    <!-- Dev Toolbar -->
-    <div id="dev-toolbar">
-        <span>🚧 Dev Mode:</span>
-        <button onclick="switchDashboard('customer')" class="dev-btn active">Customer</button>
-        <button onclick="switchDashboard('owner')" class="dev-btn">Owner</button>
-        <button onclick="switchDashboard('admin')" class="dev-btn">Admin</button>
-    </div>
-
     <header>
         <div class="container">
             <div class="logo">DocBook ✨</div>
@@ -32,8 +24,10 @@
                 <button id="map-btn" class="btn-outline"
                     style="background: linear-gradient(135deg, #f3e8ff, #e0aaff); border: none;">📍 Map</button>
                 <button id="login-btn" class="btn-outline">Login</button>
-                <div id="user-profile" style="display: none;">
-                    <span id="user-name"></span>
+                <div id="user-profile" style="display: none; align-items: center; gap: 10px;">
+                    <span id="user-name" style="font-weight: 500;"></span>
+                    <button onclick="handleLogout()" class="btn-link"
+                        style="color: #666; font-size: 0.9rem;">Logout</button>
                 </div>
             </nav>
         </div>
