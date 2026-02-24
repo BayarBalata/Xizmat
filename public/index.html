@@ -15,15 +15,18 @@
 </head>
 
 <body>
-    <header>
-        <div class="container">
-            <div class="logo">DocBook ✨</div>
-            <nav>
+    <header style="padding: 10px 0;">
+        <div class="container" style="display: flex; justify-content: space-between; align-items: center;">
+            <div class="logo" style="color: var(--primary);">Serenity Beauty ✨</div>
+            <nav style="display: flex; gap: 30px; align-items: center; justify-content: center; flex: 1;">
                 <a href="#home" class="nav-link">Home</a>
-                <a href="#explore" class="nav-link">Explore</a>
-                <button id="map-btn" class="btn-outline"
-                    style="background: linear-gradient(135deg, #f3e8ff, #e0aaff); border: none;">📍 Map</button>
-                <button id="login-btn" class="btn-outline">Login</button>
+                <a href="#explore" class="nav-link">Services</a>
+                <a href="#sponsor-banner" class="nav-link">Partners</a>
+                <a href="#auth-modal" onclick="showAuthStep('login')" class="nav-link">Account</a>
+            </nav>
+            <div class="header-actions" style="display: flex; gap: 15px; align-items: center;">
+                <button id="map-btn" class="btn-outline" style="padding: 10px 20px;">📍 Map</button>
+                <button id="login-btn" class="btn-primary">Book Now</button>
                 <div id="user-profile" class="user-dropdown-container"
                     style="display: none; align-items: center; gap: 8px;" onclick="toggleUserDropdown()">
                     <span id="user-name" style="font-weight: 500;"></span>
@@ -48,19 +51,53 @@
                         </div>
                     </div>
                 </div>
-            </nav>
-        </div>
+                </nav>
+            </div>
     </header>
 
     <!-- CUSTOMER DASHBOARD -->
     <main id="dashboard-customer">
-        <section id="home" class="hero">
-            <div class="container">
-                <h1>Discover Beauty Salons & Centers</h1>
-                <p>Book appointments at the best salons and beauty centers in your city.</p>
-                <div class="search-bar">
-                    <input type="text" placeholder="Search for services (e.g. Haircut, Botox)...">
-                    <button class="btn-primary">Search</button>
+        <section id="home" class="hero serenity-hero">
+            <div class="hero-bg-overlay"></div>
+
+            <div class="photo-slider-wrapper">
+                <div class="photo-slider-track">
+                    <img src="https://images.unsplash.com/photo-1560066984-138dadb4c035?auto=format&fit=crop&w=1200&q=80"
+                        alt="Spa Resort">
+                    <img src="https://images.unsplash.com/photo-1516975080661-46bfa20281ba?auto=format&fit=crop&w=1200&q=80"
+                        alt="Nail Art">
+                    <img src="https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=1200&q=80"
+                        alt="Hair Salon">
+                    <img src="https://images.unsplash.com/photo-1600948836101-f9ff169a1c1b?auto=format&fit=crop&w=1200&q=80"
+                        alt="Luxury Spa">
+                    <img src="https://images.unsplash.com/photo-1596178065887-1198b6148b2b?auto=format&fit=crop&w=1200&q=80"
+                        alt="Skincare">
+                    <img src="https://images.unsplash.com/photo-1522337660859-02fbefca4702?auto=format&fit=crop&w=1200&q=80"
+                        alt="Beauty Products">
+                </div>
+            </div>
+
+            <div class="container hero-content" style="position: relative; z-index: 3;">
+                <div class="hero-icon" style="font-size: 2rem; color: #fcd2db; margin-bottom: 10px;">✨</div>
+                <h4 style="color: #fcd2db; margin-bottom: 15px; font-weight: 500;">Discover Your Natural Beauty
+                </h4>
+                <h1
+                    style="font-size: 3.5rem; color: #ffffff; margin-bottom: 20px; max-width: 800px; margin-left: auto; margin-right: auto; line-height: 1.2;">
+                    Experience luxury treatments and personalized care in our tranquil sanctuary.</h1>
+                <p style="font-size: 1.2rem; color: rgba(255,255,255,0.7); margin-bottom: 40px;">
+                    Where beauty meets
+                    wellness.</p>
+
+                <div class="hero-actions"
+                    style="display: flex; gap: 20px; justify-content: center; margin-bottom: 40px; margin-top: 40px;">
+                    <button class="btn-primary"
+                        onclick="document.getElementById('explore').scrollIntoView({behavior: 'smooth'})">Book
+                        Appointment</button>
+                </div>
+                <div class="search-bar serenity-search" style="max-width: 700px; padding: 12px; border-radius: 60px;">
+                    <input type="text" placeholder="Search for treatments (e.g. Facial, Massage)..."
+                        style="font-size: 1.1rem;">
+                    <button class="btn-primary" style="padding: 12px 30px;">Search</button>
                 </div>
             </div>
         </section>
