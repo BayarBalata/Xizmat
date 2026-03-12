@@ -927,13 +927,26 @@ async function fetchBookedSlots(merchantId, dateStr) {
         const dayEnd = new Date(dayStart);
         dayEnd.setDate(dayEnd.getDate() + 1);
 
-        const q = query(
-            collection(db, "bookings"),
-            where("storeId", "==", merchantId),
-            where("bookingDate", ">=", dayStart),
-            where("bookingDate", "<", dayEnd)
-        );
-        const snapshot = await getDocs(q);
+        let snapshot;
+        try {
+            // Try composite index query first (storeId + bookingDate range)
+            const q = query(
+                collection(db, "bookings"),
+                where("storeId", "==", merchantId),
+                where("bookingDate", ">=", dayStart),
+                where("bookingDate", "<", dayEnd)
+            );
+            snapshot = await getDocs(q);
+        } catch (indexError) {
+            // Fallback: query by storeId only, then filter dates client-side
+            console.warn("Composite index not ready, using fallback query:", indexError.message);
+            const fallbackQ = query(
+                collection(db, "bookings"),
+                where("storeId", "==", merchantId)
+            );
+            snapshot = await getDocs(fallbackQ);
+        }
+
         const bookedTimes = new Set();
 
         snapshot.forEach(docSnap => {
@@ -942,9 +955,17 @@ async function fetchBookedSlots(merchantId, dateStr) {
             if (data.status === 'cancelled') return;
 
             const bDate = data.bookingDate?.toDate ? data.bookingDate.toDate() : new Date(data.bookingDate);
+            
+            // Filter by date (needed for fallback path)
+            if (bDate.getFullYear() !== dayStart.getFullYear() ||
+                bDate.getMonth() !== dayStart.getMonth() ||
+                bDate.getDate() !== dayStart.getDate()) {
+                return;
+            }
+
             const h = bDate.getHours();
             const m = bDate.getMinutes();
-            bookedTimes.add(`${h}:${m === 0 ? '00' : m}`);
+            bookedTimes.add(`${h}:${m === 0 ? '00' : String(m).padStart(2, '0')}`);
         });
 
         bookedSlotsCache[cacheKey] = bookedTimes;
