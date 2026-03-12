@@ -1,5 +1,5 @@
 import { db, auth, storage } from "./firebase-config.js";
-import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { RecaptchaVerifier, signInWithPhoneNumber, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
@@ -1030,31 +1030,45 @@ window.submitBooking = async function () {
     const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
     const totalDuration = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
 
-    // Create Date Object
-    const dateTimeStr = `${bookingState.date} ${bookingState.time}`;
-    const bookingDateObj = new Date(dateTimeStr);
+    // Create Date Object - parse properly to avoid browser inconsistencies
+    const selectedDate = new Date(bookingState.date);
+    const [hours, minutes] = bookingState.time.split(':').map(Number);
+    const bookingDateObj = new Date(
+        selectedDate.getFullYear(),
+        selectedDate.getMonth(),
+        selectedDate.getDate(),
+        hours,
+        minutes
+    );
+
+    // Validate booking date is not in the past
+    if (bookingDateObj < new Date()) {
+        showToast("Cannot book in the past. Please select a future date/time.", 'error');
+        return;
+    }
+
+    // Recalculate commission from verified service prices (10%)
+    const commission = Math.round(totalCost * 0.1);
 
     try {
         const bookingData = {
             userId: currentUser.id || currentUser.phone,
             customerName: currentUser.name,
             customerPhone: currentUser.phone,
-            storeId: bookingState.merchant.id, // Ensure this is saved as storeId
-            merchantId: bookingState.merchant.id, // Keep for backward compatibility
+            storeId: bookingState.merchant.id,
+            merchantId: bookingState.merchant.id,
             storeName: bookingState.merchant.name,
 
-            // New Array Structure
             services: bookingState.services,
 
-            // Legacy fields for backward compat (using first service or summary)
             serviceName: bookingState.services.map(s => s.name).join(', '),
             servicePrice: totalCost,
-            price: totalCost, // key for owner dashboard compatibility
+            price: totalCost,
             serviceDuration: totalDuration,
 
             bookingDate: bookingDateObj,
             status: 'pending',
-            commission: Math.round(totalCost * 0.1),
+            commission: commission,
             createdAt: new Date().toISOString()
         };
 
@@ -1398,11 +1412,20 @@ window.saveServicesOrder = async function () {
     const newServices = [];
 
     items.forEach(item => {
-        const name = item.dataset.name;
-        const price = parseInt(item.dataset.price);
-        const duration = parseInt(item.dataset.duration);
+        const name = (item.dataset.name || '').trim();
+        const price = Math.max(0, parseInt(item.dataset.price) || 0);
+        const duration = Math.max(1, parseInt(item.dataset.duration) || 30);
+
+        // Skip empty or invalid service names
+        if (!name) return;
+
         newServices.push({ name, price, duration });
     });
+
+    if (newServices.length === 0) {
+        showToast('Please add at least one valid service.', 'error');
+        return;
+    }
 
     try {
         await updateDoc(doc(db, "merchants", storeId), { services: newServices });
@@ -1955,9 +1978,9 @@ async function loadFinancials(filter = currentFinancialFilter) {
     // Load invoices from Firestore
     await loadInvoicesFromFirestore();
 
-    // Load Bookings from Firestore (Real Data)
+    // Load Bookings from Firestore with pagination (max 500 per load)
     if (currentUser.role === 'admin') {
-        const q = query(collection(db, "bookings"), orderBy("bookingDate", "desc"));
+        const q = query(collection(db, "bookings"), orderBy("bookingDate", "desc"), limit(500));
         const snapshot = await getDocs(q);
 
         allBookings = [];
@@ -1966,7 +1989,7 @@ async function loadFinancials(filter = currentFinancialFilter) {
             allBookings.push({
                 id: docSnap.id,
                 ...data,
-                bookingDate: data.bookingDate.toDate ? data.bookingDate.toDate() : new Date(data.bookingDate)
+                bookingDate: data.bookingDate?.toDate ? data.bookingDate.toDate() : new Date(data.bookingDate)
             });
         });
     }
@@ -2013,20 +2036,21 @@ async function loadFinancials(filter = currentFinancialFilter) {
     const paidBookingIds = new Set();
     allInvoices.forEach(inv => {
         if (inv.isPaid && inv.bookings) {
-            inv.bookings.forEach(b => paidBookingIds.add(b.id || b.bookingId)); // Handle potential schema variations
+            inv.bookings.forEach(b => paidBookingIds.add(b.id || b.bookingId));
         }
     });
 
-    // Calculate stats
+    // Calculate stats from FILTERED bookings (for revenue table)
     const completedBookings = filteredBookings.filter(b => b.status === 'completed');
 
-    const totalRevenue = completedBookings.reduce((sum, b) => sum + b.servicePrice, 0);
-    const totalCommission = completedBookings.reduce((sum, b) => sum + b.commission, 0);
+    const totalRevenue = completedBookings.reduce((sum, b) => sum + (b.servicePrice || 0), 0);
+    const totalCommission = completedBookings.reduce((sum, b) => sum + (b.commission || 0), 0);
 
-    // Pending Payouts = Commission from COMPLETED bookings that are NOT paid
-    const pendingPayoutAmount = completedBookings
+    // PENDING PAYOUTS: Use ALL bookings (not filtered!) to show true outstanding debt
+    const allCompletedBookings = allBookings.filter(b => b.status === 'completed');
+    const pendingPayoutAmount = allCompletedBookings
         .filter(b => !paidBookingIds.has(b.id))
-        .reduce((sum, b) => sum + b.commission, 0);
+        .reduce((sum, b) => sum + (b.commission || 0), 0);
 
     // This month stats (always from current month)
     const thisMonthBookings = allBookings.filter(b => {
@@ -2034,7 +2058,7 @@ async function loadFinancials(filter = currentFinancialFilter) {
             b.bookingDate.getFullYear() === now.getFullYear() &&
             b.status === 'completed';
     });
-    const thisMonthCommission = thisMonthBookings.reduce((sum, b) => sum + b.commission, 0);
+    const thisMonthCommission = thisMonthBookings.reduce((sum, b) => sum + (b.commission || 0), 0);
 
     // Update stat cards
     document.getElementById('stat-total-revenue').textContent = totalRevenue.toLocaleString() + ' IQD';
@@ -2891,6 +2915,12 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
 
         const bookingData = bookingSnap.data();
 
+        // Authorization: Only the merchant who owns this booking's store (or admin) can update
+        if (currentUser.role === 'owner' && bookingData.storeId !== currentUser.storeId) {
+            showToast('You can only update bookings for your own store.', 'error');
+            return;
+        }
+
         // Update booking status
         await updateDoc(bookingRef, {
             status: newStatus,
@@ -3606,7 +3636,14 @@ function renderServiceSearchStep(step) {
             if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') applyServiceBudgetFilter(); });
         }, 50);
     } else if (step === 'results') {
-        renderServiceSearchResults();
+        // Show loading state while searching
+        body.innerHTML = `
+            <div style="text-align:center; padding:60px 0;">
+                <div style="font-size:2rem; margin-bottom:12px;">🔍</div>
+                <p style="color: var(--text-light);">Searching salons...</p>
+            </div>
+        `;
+        setTimeout(() => renderServiceSearchResults(), 100);
     }
 }
 
