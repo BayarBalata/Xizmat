@@ -3496,6 +3496,200 @@ async function saveOwnerService(e) {
 }
 
 
+// ==========================================================
+// ================== SERVICE BUDGET SEARCH =================
+// ==========================================================
+
+const SERVICE_CATEGORIES = [
+    {
+        name: 'Nails 💅',
+        key: 'nails',
+        subServices: ['Nail Polish', 'Gel Nails', 'Acrylic Nails', 'Manicure', 'Pedicure', 'Nail Art', 'French Tips', 'Nail Extensions']
+    },
+    {
+        name: 'Hair 💇',
+        key: 'hair',
+        subServices: ['Haircut', 'Hair Color', 'Highlights', 'Keratin Treatment', 'Hair Blowout', 'Balayage', 'Hair Extensions', 'Hair Treatment']
+    },
+    {
+        name: 'Skin & Glow ✨',
+        key: 'skin',
+        subServices: ['Facial', 'Deep Cleansing', 'Chemical Peel', 'Microdermabrasion', 'Hydrafacial', 'Anti-Aging Treatment', 'Skin Brightening', 'Acne Treatment']
+    },
+    {
+        name: 'Massage 💆',
+        key: 'massage',
+        subServices: ['Swedish Massage', 'Deep Tissue Massage', 'Hot Stone Massage', 'Aromatherapy', 'Couple Massage', 'Back Massage', 'Foot Massage', 'Head Massage']
+    },
+    {
+        name: 'Makeup 💄',
+        key: 'makeup',
+        subServices: ['Full Makeup', 'Natural Makeup', 'Bridal Makeup', 'Party Makeup', 'Eyeshadow', 'Eyelashes', 'Contouring', 'Airbrush Makeup']
+    },
+    {
+        name: 'Brows & Lashes 👁️',
+        key: 'brows',
+        subServices: ['Eyebrow Threading', 'Eyebrow Tinting', 'Eyebrow Lamination', 'Lash Lift', 'Lash Extensions', 'Lash Tint', 'HD Brows']
+    },
+    {
+        name: 'Laser & Aesthetics 🔬',
+        key: 'laser',
+        subServices: ['Laser Hair Removal', 'Botox', 'Filler', 'PRP', 'Carbon Peel', 'Mesotherapy', 'RF Lifting']
+    },
+    {
+        name: 'Waxing & Threading 🧖',
+        key: 'waxing',
+        subServices: ['Full Body Wax', 'Leg Wax', 'Arm Wax', 'Underarm Wax', 'Facial Wax', 'Threading']
+    }
+];
+
+let serviceSearchState = {
+    selectedCategory: null,
+    selectedSubService: null,
+    budget: null
+};
+
+window.openServiceSearch = function () {
+    serviceSearchState = { selectedCategory: null, selectedSubService: null, budget: null };
+    renderServiceSearchStep('categories');
+    document.getElementById('service-search-modal').style.display = 'flex';
+};
+
+function renderServiceSearchStep(step) {
+    const body = document.getElementById('service-search-body');
+
+    if (step === 'categories') {
+        body.innerHTML = `
+            <h2 style="margin-bottom:6px;">Find a Service</h2>
+            <p style="color: var(--text-light); margin-bottom: 24px; font-size: 0.95rem;">What are you looking for today?</p>
+            <div class="service-category-grid">
+                ${SERVICE_CATEGORIES.map(cat => `
+                    <div class="service-category-card" onclick="selectServiceCategory('${cat.key}')">
+                        <span class="cat-icon">${cat.name.split(' ').slice(-1)[0]}</span>
+                        <span class="cat-name">${cat.name.split(' ').slice(0, -1).join(' ')}</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    } else if (step === 'subservices') {
+        const cat = SERVICE_CATEGORIES.find(c => c.key === serviceSearchState.selectedCategory);
+        body.innerHTML = `
+            <button class="btn-back" onclick="renderServiceSearchStep('categories')">← Back</button>
+            <h2 style="margin-bottom:6px;">${cat.name}</h2>
+            <p style="color: var(--text-light); margin-bottom: 20px; font-size: 0.95rem;">Select a specific service</p>
+            <div class="service-subservice-list">
+                ${cat.subServices.map(s => `
+                    <div class="service-subservice-item" onclick="selectSubService('${s}')">
+                        <span>${s}</span>
+                        <span style="color: var(--primary); font-size: 1.1rem;">→</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    } else if (step === 'budget') {
+        body.innerHTML = `
+            <button class="btn-back" onclick="renderServiceSearchStep('subservices')">← Back</button>
+            <h2 style="margin-bottom:6px;">${serviceSearchState.selectedSubService}</h2>
+            <p style="color: var(--text-light); margin-bottom: 24px; font-size: 0.95rem;">Set your budget <span style="font-weight:500;">(optional)</span></p>
+            <div class="budget-input-wrapper">
+                <input type="number" id="budget-input" class="budget-input" placeholder="e.g. 40000" min="0" step="1000">
+                <span class="budget-currency">IQD</span>
+            </div>
+            <p style="color: var(--text-light); font-size: 0.8rem; text-align: center; margin-top: 10px;">Leave empty to see all salons offering this service</p>
+            <button class="btn-primary" style="width: 100%; margin-top: 24px;" onclick="applyServiceBudgetFilter()">
+                🔍 Search Salons
+            </button>
+        `;
+        // Allow pressing Enter to search
+        setTimeout(() => {
+            const inp = document.getElementById('budget-input');
+            if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') applyServiceBudgetFilter(); });
+        }, 50);
+    } else if (step === 'results') {
+        renderServiceSearchResults();
+    }
+}
+
+window.selectServiceCategory = function (key) {
+    serviceSearchState.selectedCategory = key;
+    renderServiceSearchStep('subservices');
+};
+
+window.selectSubService = function (name) {
+    serviceSearchState.selectedSubService = name;
+    renderServiceSearchStep('budget');
+};
+
+window.applyServiceBudgetFilter = function () {
+    const budgetRaw = document.getElementById('budget-input')?.value?.trim();
+    serviceSearchState.budget = budgetRaw ? parseInt(budgetRaw, 10) : null;
+    renderServiceSearchStep('results');
+};
+
+function renderServiceSearchResults() {
+    const body = document.getElementById('service-search-body');
+    const { selectedSubService, budget } = serviceSearchState;
+    const key = selectedSubService.toLowerCase();
+
+    // Find merchants with a matching service
+    const results = [];
+    allMerchants.forEach(merchant => {
+        if (!merchant.services || merchant.services.length === 0) return;
+        merchant.services.forEach(s => {
+            if (!s.name.toLowerCase().includes(key)) return;
+            if (budget !== null && s.price > budget) return;
+            results.push({ merchant, service: s });
+        });
+    });
+
+    const budgetLabel = budget ? `Budget: ${budget.toLocaleString()} IQD` : 'No budget limit';
+
+    if (results.length === 0) {
+        body.innerHTML = `
+            <button class="btn-back" onclick="renderServiceSearchStep('budget')">← Back</button>
+            <h2 style="margin-bottom:6px;">${selectedSubService}</h2>
+            <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}</p>
+            <div class="empty-state" style="padding: 40px 0;">
+                <div style="font-size:3rem; margin-bottom:12px;">😔</div>
+                <p>No salons found for this service${budget ? ' in your budget' : ''}.</p>
+                <button class="btn-outline" style="margin-top:16px;" onclick="renderServiceSearchStep('budget')">Try a higher budget</button>
+            </div>
+        `;
+        return;
+    }
+
+    body.innerHTML = `
+        <button class="btn-back" onclick="renderServiceSearchStep('budget')">← Back</button>
+        <h2 style="margin-bottom:6px;">${selectedSubService}</h2>
+        <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel} · <strong>${results.length} salon${results.length > 1 ? 's' : ''} found</strong></p>
+        <div class="service-results-list">
+            ${results.map(({ merchant, service }) => {
+                const imageContent = merchant.photoUrl
+                    ? `<img src="${merchant.photoUrl}" alt="${merchant.name}">`
+                    : `<span style="font-size:2.5rem;">${merchant.image || '✨'}</span>`;
+                return `
+                <div class="service-result-card" onclick="openMerchantDetails('${merchant.id}'); closeModal('service-search-modal');">
+                    <div class="service-result-img">${imageContent}</div>
+                    <div class="service-result-info">
+                        <div class="service-result-name">${merchant.name}</div>
+                        <div class="service-result-meta">⭐ ${merchant.rating} · 📍 ${merchant.address}</div>
+                        <div class="service-result-service">
+                            <span>${service.name}</span>
+                            <span class="service-result-price">${service.price.toLocaleString()} IQD</span>
+                        </div>
+                    </div>
+                    <div class="service-result-action">
+                        <button class="btn-primary" style="padding: 10px 18px; font-size:0.9rem;" onclick="event.stopPropagation(); openMerchantDetails('${merchant.id}'); closeModal('service-search-modal');">
+                            Book
+                        </button>
+                    </div>
+                </div>
+            `}).join('')}
+        </div>
+    `;
+}
+
+
 // Start
 init();
 initDarkMode();

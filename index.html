@@ -93,6 +93,8 @@
                     <button class="btn-primary"
                         onclick="document.getElementById('explore').scrollIntoView({behavior: 'smooth'})">Book
                         Appointment</button>
+                    <button class="btn-outline" style="background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.5); color: white; backdrop-filter: blur(4px);"
+                        onclick="openServiceSearch()">💅 Find a Service</button>
                 </div>
                 <div class="search-bar serenity-search" style="max-width: 700px; padding: 12px; border-radius: 60px;">
                     <input type="text" placeholder="Search for treatments (e.g. Facial, Massage)..."
@@ -1044,6 +1046,16 @@
             background: linear-gradient(135deg, #4facfe, #00f2fe);
             border: none; color: white; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.7rem;
         ">👑 Admin</button>
+    </div>
+
+    <!-- SERVICE SEARCH MODAL -->
+    <div id="service-search-modal" class="modal">
+        <div class="modal-content service-search-box">
+            <span class="close-modal" onclick="closeModal('service-search-modal')">&times;</span>
+            <div id="service-search-body">
+                <!-- Rendered dynamically by JS -->
+            </div>
+        </div>
     </div>
 
     <!-- Toast Container -->
