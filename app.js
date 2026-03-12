@@ -789,16 +789,42 @@ let bookingState = {
     bookedSlots: null
 };
 
-window.openMerchantDetails = function (id) {
+window.openMerchantDetails = function (id, preselectedServiceJson = null) {
     const merchant = allMerchants.find(m => m.id === id);
     if (!merchant) return;
+
+    let initialServices = [];
+    if (preselectedServiceJson) {
+        try {
+            const preselectedService = JSON.parse(decodeURIComponent(preselectedServiceJson));
+            const now = new Date();
+            
+            // Apply offer discount if available
+            const merchantOffers = allOffers.filter(o => {
+                if (o.storeId !== merchant.id) return false;
+                const endDate = o.endDate?.toDate ? o.endDate.toDate() : new Date(o.endDate);
+                return endDate > now && o.active;
+            });
+            const offer = merchantOffers.find(o => o.serviceName === preselectedService.name);
+            const discountPercent = offer ? offer.discountPercent : 0;
+            const currentPrice = offer ? Math.round(preselectedService.price * (1 - discountPercent / 100)) : preselectedService.price;
+            
+            initialServices.push({
+                name: preselectedService.name,
+                price: currentPrice,
+                duration: preselectedService.duration
+            });
+        } catch(e) {
+            console.error("Failed to parse preselected service:", e);
+        }
+    }
 
     // Reset State
     // Clear booked slots cache for fresh data
     bookedSlotsCache = {};
     bookingState = {
         merchant: merchant,
-        services: [],
+        services: initialServices,
         date: null,
         time: null,
         step: 1,
@@ -3872,7 +3898,7 @@ function renderServiceSearchResults() {
                         </div>
                     </div>
                     <div class="service-result-action">
-                        <button class="btn-primary" style="padding: 10px 18px; font-size:0.9rem;" onclick="event.stopPropagation(); openMerchantDetails('${merchant.id}'); closeModal('service-search-modal');">
+                        <button class="btn-primary" style="padding: 10px 18px; font-size:0.9rem;" onclick="event.stopPropagation(); openMerchantDetails('${merchant.id}', '${encodeURIComponent(JSON.stringify(service))}'); closeModal('service-search-modal');">
                             Book
                         </button>
                     </div>
