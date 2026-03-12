@@ -976,41 +976,87 @@ async function fetchBookedSlots(merchantId, dateStr) {
     }
 }
 
+// Customer booking calendar month tracker
+let bookingCalendarMonth = new Date();
+
 function renderBookingStep2() {
-    // Generate next 14 days
-    let datesHtml = '';
     const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const year = bookingCalendarMonth.getFullYear();
+    const month = bookingCalendarMonth.getMonth();
+    const monthLabel = new Date(year, month).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
-    for (let i = 0; i < 14; i++) {
-        const d = new Date(today);
-        d.setDate(today.getDate() + i);
-        const dateStr = d.toDateString();
-        const isSelected = bookingState.date === dateStr;
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-        const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
-        const dayNum = d.getDate();
+    // Build calendar grid cells
+    let calendarCells = '';
 
-        datesHtml += `
-            <div class="date-card ${isSelected ? 'selected' : ''}" onclick="selectBookingDate('${dateStr}')">
-                <div style="font-size: 0.8rem;">${dayName}</div>
-                <div style="font-weight: 700; font-size: 1.2rem;">${dayNum}</div>
-            </div>
-        `;
+    // Day headers
+    const dayHeaders = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    dayHeaders.forEach(d => {
+        calendarCells += `<div class="booking-cal-header">${d}</div>`;
+    });
+
+    // Empty cells for offset
+    for (let i = 0; i < firstDay; i++) {
+        calendarCells += `<div class="booking-cal-cell empty"></div>`;
     }
 
-    // Time slots will be rendered after date selection (async)
+    // Day cells
+    for (let day = 1; day <= daysInMonth; day++) {
+        const cellDate = new Date(year, month, day);
+        const dateStr = cellDate.toDateString();
+        const isToday = cellDate.toDateString() === new Date().toDateString();
+        const isPast = cellDate < today;
+        const isSelected = bookingState.date === dateStr;
+
+        // Check if we know how many booked slots exist for this day (from cache)
+        const cacheKey = `${bookingState.merchant.id}_${dateStr}`;
+        const cachedSlots = bookedSlotsCache[cacheKey];
+        let badgeHtml = '';
+        if (cachedSlots && cachedSlots.size > 0) {
+            badgeHtml = `<span class="cal-booked-badge">${cachedSlots.size} Booked</span>`;
+        }
+
+        const classes = ['booking-cal-cell',
+            isToday ? 'today' : '',
+            isPast ? 'past' : '',
+            isSelected ? 'selected' : ''
+        ].filter(Boolean).join(' ');
+
+        if (isPast) {
+            calendarCells += `<div class="${classes}"><span class="cal-day-num">${day}</span></div>`;
+        } else {
+            calendarCells += `<div class="${classes}" onclick="selectBookingDate('${dateStr}')"><span class="cal-day-num">${day}</span>${badgeHtml}</div>`;
+        }
+    }
+
+    // Time slots section (shown when date selected)
     let timesHtml = '';
     if (bookingState.date) {
         if (bookingState.bookedSlots === undefined) {
-            // Still loading booked slots
-            timesHtml = '<p style="grid-column: span 3; text-align: center; color: #888;">Loading available times...</p>';
+            timesHtml = '<div class="booking-times-loading">⏳ Loading available times...</div>';
         } else {
             const startHour = 10;
             const endHour = 20;
             const bookedSlots = bookingState.bookedSlots || new Set();
+            const totalSlots = (endHour - startHour) * 2;
+            const bookedCount = bookedSlots.size;
+            const availCount = totalSlots - bookedCount;
+
+            timesHtml = `
+                <div class="booking-times-header">
+                    <h4>📅 ${new Date(bookingState.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</h4>
+                    <div class="slots-summary">
+                        <span class="slots-available">✅ ${availCount} Available</span>
+                        ${bookedCount > 0 ? `<span class="slots-booked">🚫 ${bookedCount} Booked</span>` : ''}
+                    </div>
+                </div>
+                <div class="time-slots-grid">
+            `;
 
             for (let h = startHour; h < endHour; h++) {
-                // :00
                 const time1 = `${h}:00`;
                 const isSel1 = bookingState.time === time1;
                 const isBooked1 = bookedSlots.has(time1);
@@ -1023,7 +1069,6 @@ function renderBookingStep2() {
                     timesHtml += `<div class="time-slot ${isSel1 ? 'selected' : ''}" onclick="selectBookingTime('${time1}')">${time1}</div>`;
                 }
 
-                // :30
                 const time2 = `${h}:30`;
                 const isSel2 = bookingState.time === time2;
                 const isBooked2 = bookedSlots.has(time2);
@@ -1036,34 +1081,47 @@ function renderBookingStep2() {
                     timesHtml += `<div class="time-slot ${isSel2 ? 'selected' : ''}" onclick="selectBookingTime('${time2}')">${time2}</div>`;
                 }
             }
+
+            timesHtml += `</div>`;
         }
-    } else {
-        timesHtml = '<p style="grid-column: span 3; text-align: center; color: #888;">Select a date first</p>';
     }
 
+    const canGoPrev = month > new Date().getMonth() || year > new Date().getFullYear();
+
     return `
-        <h3 style="margin-bottom: 10px;">Select Date</h3>
-        <div class="date-picker-grid">
-            ${datesHtml}
+        <div class="booking-calendar-wrapper">
+            <div class="booking-cal-nav">
+                <button class="cal-nav-btn" onclick="changeBookingCalMonth(-1)" ${!canGoPrev ? 'disabled' : ''}>‹</button>
+                <h3 class="cal-month-label">${monthLabel}</h3>
+                <button class="cal-nav-btn" onclick="changeBookingCalMonth(1)">›</button>
+            </div>
+            <div class="booking-cal-grid">
+                ${calendarCells}
+            </div>
         </div>
-        
-        <h3 style="margin-bottom: 10px;">Select Time</h3>
-        <div class="time-slots-grid">
-            ${timesHtml}
-        </div>
+
+        ${bookingState.date ? `<div class="booking-times-panel">${timesHtml}</div>` : `
+            <div class="booking-times-placeholder">
+                <p>👆 Select a date on the calendar to see available time slots</p>
+            </div>
+        `}
     `;
 }
+
+window.changeBookingCalMonth = function (offset) {
+    bookingCalendarMonth.setMonth(bookingCalendarMonth.getMonth() + offset);
+    renderBookingWizard();
+};
 
 window.selectBookingDate = async function (dateStr) {
     bookingState.date = dateStr;
     bookingState.time = null;
-    bookingState.bookedSlots = undefined; // Mark as loading
+    bookingState.bookedSlots = undefined;
     renderBookingWizard();
 
-    // Fetch booked slots from Firestore
     const bookedSlots = await fetchBookedSlots(bookingState.merchant.id, dateStr);
     bookingState.bookedSlots = bookedSlots;
-    renderBookingWizard(); // Re-render with booked slots
+    renderBookingWizard();
 }
 
 window.selectBookingTime = function (timeStr) {
