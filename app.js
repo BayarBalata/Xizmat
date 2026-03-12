@@ -782,10 +782,11 @@ window.initMapCallback = function () {
 // Global scope for HTML access
 let bookingState = {
     merchant: null,
-    services: [], // Array of selected service objects
+    services: [],
     date: null,
     time: null,
-    step: 1
+    step: 1,
+    bookedSlots: null
 };
 
 window.openMerchantDetails = function (id) {
@@ -793,12 +794,15 @@ window.openMerchantDetails = function (id) {
     if (!merchant) return;
 
     // Reset State
+    // Clear booked slots cache for fresh data
+    bookedSlotsCache = {};
     bookingState = {
         merchant: merchant,
         services: [],
         date: null,
         time: null,
-        step: 1
+        step: 1,
+        bookedSlots: null
     };
 
     renderBookingWizard();
@@ -910,6 +914,47 @@ window.toggleServiceSelection = function (name, price, duration) {
 }
 
 // --- STEP 2: DATE & TIME ---
+// Cache booked slots per date to avoid re-fetching
+let bookedSlotsCache = {};
+
+async function fetchBookedSlots(merchantId, dateStr) {
+    const cacheKey = `${merchantId}_${dateStr}`;
+    if (bookedSlotsCache[cacheKey]) return bookedSlotsCache[cacheKey];
+
+    try {
+        const selectedDate = new Date(dateStr);
+        const dayStart = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate());
+        const dayEnd = new Date(dayStart);
+        dayEnd.setDate(dayEnd.getDate() + 1);
+
+        const q = query(
+            collection(db, "bookings"),
+            where("storeId", "==", merchantId),
+            where("bookingDate", ">=", dayStart),
+            where("bookingDate", "<", dayEnd)
+        );
+        const snapshot = await getDocs(q);
+        const bookedTimes = new Set();
+
+        snapshot.forEach(docSnap => {
+            const data = docSnap.data();
+            // Only count non-cancelled bookings
+            if (data.status === 'cancelled') return;
+
+            const bDate = data.bookingDate?.toDate ? data.bookingDate.toDate() : new Date(data.bookingDate);
+            const h = bDate.getHours();
+            const m = bDate.getMinutes();
+            bookedTimes.add(`${h}:${m === 0 ? '00' : m}`);
+        });
+
+        bookedSlotsCache[cacheKey] = bookedTimes;
+        return bookedTimes;
+    } catch (e) {
+        console.error("Error fetching booked slots:", e);
+        return new Set();
+    }
+}
+
 function renderBookingStep2() {
     // Generate next 14 days
     let datesHtml = '';
@@ -932,21 +977,44 @@ function renderBookingStep2() {
         `;
     }
 
-    // Generate Time Slots (10:00 to 20:00)
+    // Time slots will be rendered after date selection (async)
     let timesHtml = '';
     if (bookingState.date) {
-        const startHour = 10;
-        const endHour = 20;
-        for (let h = startHour; h < endHour; h++) {
-            // :00
-            const time1 = `${h}:00`;
-            const isSel1 = bookingState.time === time1;
-            timesHtml += `<div class="time-slot ${isSel1 ? 'selected' : ''}" onclick="selectBookingTime('${time1}')">${time1}</div>`;
+        if (bookingState.bookedSlots === undefined) {
+            // Still loading booked slots
+            timesHtml = '<p style="grid-column: span 3; text-align: center; color: #888;">Loading available times...</p>';
+        } else {
+            const startHour = 10;
+            const endHour = 20;
+            const bookedSlots = bookingState.bookedSlots || new Set();
 
-            // :30
-            const time2 = `${h}:30`;
-            const isSel2 = bookingState.time === time2;
-            timesHtml += `<div class="time-slot ${isSel2 ? 'selected' : ''}" onclick="selectBookingTime('${time2}')">${time2}</div>`;
+            for (let h = startHour; h < endHour; h++) {
+                // :00
+                const time1 = `${h}:00`;
+                const isSel1 = bookingState.time === time1;
+                const isBooked1 = bookedSlots.has(time1);
+                if (isBooked1) {
+                    timesHtml += `<div class="time-slot booked" title="Already booked">
+                        <span style="text-decoration: line-through;">${time1}</span>
+                        <span style="font-size:0.65rem; display:block; color:#ef4444;">Booked</span>
+                    </div>`;
+                } else {
+                    timesHtml += `<div class="time-slot ${isSel1 ? 'selected' : ''}" onclick="selectBookingTime('${time1}')">${time1}</div>`;
+                }
+
+                // :30
+                const time2 = `${h}:30`;
+                const isSel2 = bookingState.time === time2;
+                const isBooked2 = bookedSlots.has(time2);
+                if (isBooked2) {
+                    timesHtml += `<div class="time-slot booked" title="Already booked">
+                        <span style="text-decoration: line-through;">${time2}</span>
+                        <span style="font-size:0.65rem; display:block; color:#ef4444;">Booked</span>
+                    </div>`;
+                } else {
+                    timesHtml += `<div class="time-slot ${isSel2 ? 'selected' : ''}" onclick="selectBookingTime('${time2}')">${time2}</div>`;
+                }
+            }
         }
     } else {
         timesHtml = '<p style="grid-column: span 3; text-align: center; color: #888;">Select a date first</p>';
@@ -965,10 +1033,16 @@ function renderBookingStep2() {
     `;
 }
 
-window.selectBookingDate = function (dateStr) {
+window.selectBookingDate = async function (dateStr) {
     bookingState.date = dateStr;
-    bookingState.time = null; // Reset time on date change
+    bookingState.time = null;
+    bookingState.bookedSlots = undefined; // Mark as loading
     renderBookingWizard();
+
+    // Fetch booked slots from Firestore
+    const bookedSlots = await fetchBookedSlots(bookingState.merchant.id, dateStr);
+    bookingState.bookedSlots = bookedSlots;
+    renderBookingWizard(); // Re-render with booked slots
 }
 
 window.selectBookingTime = function (timeStr) {
@@ -1073,6 +1147,9 @@ window.submitBooking = async function () {
         };
 
         await addDoc(collection(db, 'bookings'), bookingData);
+
+        // Invalidate booked slots cache so the slot shows as taken
+        bookedSlotsCache = {};
 
         showToast('Booking Request Sent! 🚀', 'success');
         document.getElementById('booking-modal').style.display = 'none';
