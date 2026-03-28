@@ -2446,6 +2446,24 @@ input[type="number"] {
     pointer-events: none;
 }
 
+.time-slot.partial {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    color: #92400e;
+    cursor: pointer;
+}
+
+.time-slot.partial:hover {
+    background: #fef3c7;
+    border-color: #f59e0b;
+}
+
+.time-slot.partial.selected {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+}
+
 /* ===== CUSTOMER BOOKING CALENDAR ===== */
 .booking-calendar-wrapper {
     margin-bottom: 20px;

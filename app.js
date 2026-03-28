@@ -973,7 +973,8 @@ async function fetchBookedSlots(merchantId, dateStr) {
             snapshot = await getDocs(fallbackQ);
         }
 
-        const bookedTimes = new Set();
+        // Map of time -> booking count (instead of a Set)
+        const bookedTimes = new Map();
 
         snapshot.forEach(docSnap => {
             const data = docSnap.data();
@@ -991,14 +992,34 @@ async function fetchBookedSlots(merchantId, dateStr) {
 
             const h = bDate.getHours();
             const m = bDate.getMinutes();
-            bookedTimes.add(`${h}:${m === 0 ? '00' : String(m).padStart(2, '0')}`);
+            const timeKey = `${h}:${m === 0 ? '00' : String(m).padStart(2, '0')}`;
+            bookedTimes.set(timeKey, (bookedTimes.get(timeKey) || 0) + 1);
         });
 
         bookedSlotsCache[cacheKey] = bookedTimes;
         return bookedTimes;
     } catch (e) {
         console.error("Error fetching booked slots:", e);
-        return new Set();
+        return new Map();
+    }
+}
+
+function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, workerCount) {
+    if (spotsLeft <= 0) {
+        // Fully booked
+        return `<div class="time-slot booked" title="All ${workerCount} workers booked">
+            <span style="text-decoration: line-through;">${time}</span>
+            <span style="font-size:0.65rem; display:block; color:#ef4444;">Full</span>
+        </div>`;
+    } else if (bookedCount > 0) {
+        // Partially booked — still available
+        return `<div class="time-slot partial ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')" title="${spotsLeft} of ${workerCount} workers available">
+            <span>${time}</span>
+            <span style="font-size:0.6rem; display:block; color:#d97706;">${spotsLeft} spot${spotsLeft > 1 ? 's' : ''} left</span>
+        </div>`;
+    } else {
+        // Fully available
+        return `<div class="time-slot ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')">${time}</div>`;
     }
 }
 
@@ -1042,7 +1063,9 @@ function renderBookingStep2() {
         const cachedSlots = bookedSlotsCache[cacheKey];
         let badgeHtml = '';
         if (cachedSlots && cachedSlots.size > 0) {
-            badgeHtml = `<span class="cal-booked-badge">${cachedSlots.size} Booked</span>`;
+            let totalBookings = 0;
+            cachedSlots.forEach(count => totalBookings += count);
+            badgeHtml = `<span class="cal-booked-badge">${totalBookings} Booked</span>`;
         }
 
         const classes = ['booking-cal-cell',
@@ -1066,17 +1089,30 @@ function renderBookingStep2() {
         } else {
             const startHour = 10;
             const endHour = 20;
-            const bookedSlots = bookingState.bookedSlots || new Set();
+            const bookedSlots = bookingState.bookedSlots || new Map();
+            const workerCount = bookingState.merchant.workerCount || 1;
             const totalSlots = (endHour - startHour) * 2;
-            const bookedCount = bookedSlots.size;
-            const availCount = totalSlots - bookedCount;
+            let fullyBookedCount = 0;
+            let partialCount = 0;
+
+            // Count fully booked and partial slots
+            for (let h = startHour; h < endHour; h++) {
+                ['00', '30'].forEach(m => {
+                    const timeKey = `${h}:${m}`;
+                    const count = bookedSlots.get(timeKey) || 0;
+                    if (count >= workerCount) fullyBookedCount++;
+                    else if (count > 0) partialCount++;
+                });
+            }
+            const availCount = totalSlots - fullyBookedCount;
 
             timesHtml = `
                 <div class="booking-times-header">
                     <h4>📅 ${new Date(bookingState.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</h4>
                     <div class="slots-summary">
-                        <span class="slots-available">✅ ${availCount} Available</span>
-                        ${bookedCount > 0 ? `<span class="slots-booked">🚫 ${bookedCount} Booked</span>` : ''}
+                        <span class="slots-available">✅ ${availCount} Open</span>
+                        ${fullyBookedCount > 0 ? `<span class="slots-booked">🚫 ${fullyBookedCount} Full</span>` : ''}
+                        ${workerCount > 1 ? `<span style="color:#666;font-size:0.75rem;">👷 ${workerCount} workers</span>` : ''}
                     </div>
                 </div>
                 <div class="time-slots-grid">
@@ -1085,27 +1121,15 @@ function renderBookingStep2() {
             for (let h = startHour; h < endHour; h++) {
                 const time1 = `${h}:00`;
                 const isSel1 = bookingState.time === time1;
-                const isBooked1 = bookedSlots.has(time1);
-                if (isBooked1) {
-                    timesHtml += `<div class="time-slot booked" title="Already booked">
-                        <span style="text-decoration: line-through;">${time1}</span>
-                        <span style="font-size:0.65rem; display:block; color:#ef4444;">Booked</span>
-                    </div>`;
-                } else {
-                    timesHtml += `<div class="time-slot ${isSel1 ? 'selected' : ''}" onclick="selectBookingTime('${time1}')">${time1}</div>`;
-                }
+                const count1 = bookedSlots.get(time1) || 0;
+                const spotsLeft1 = workerCount - count1;
+                timesHtml += renderTimeSlotWithCapacity(time1, isSel1, count1, spotsLeft1, workerCount);
 
                 const time2 = `${h}:30`;
                 const isSel2 = bookingState.time === time2;
-                const isBooked2 = bookedSlots.has(time2);
-                if (isBooked2) {
-                    timesHtml += `<div class="time-slot booked" title="Already booked">
-                        <span style="text-decoration: line-through;">${time2}</span>
-                        <span style="font-size:0.65rem; display:block; color:#ef4444;">Booked</span>
-                    </div>`;
-                } else {
-                    timesHtml += `<div class="time-slot ${isSel2 ? 'selected' : ''}" onclick="selectBookingTime('${time2}')">${time2}</div>`;
-                }
+                const count2 = bookedSlots.get(time2) || 0;
+                const spotsLeft2 = workerCount - count2;
+                timesHtml += renderTimeSlotWithCapacity(time2, isSel2, count2, spotsLeft2, workerCount);
             }
 
             timesHtml += `</div>`;
@@ -3404,6 +3428,7 @@ async function loadOwnerStore() {
     // Populate Form
     document.getElementById('owner-store-name').value = store.name;
     document.getElementById('owner-store-address').value = store.address || '';
+    document.getElementById('owner-store-workers').value = store.workerCount || 1;
     document.getElementById('owner-store-lat').value = store.lat || '';
     document.getElementById('owner-store-lng').value = store.lng || '';
 
@@ -3430,14 +3455,17 @@ function renderOwnerServices(services) {
 window.saveOwnerStoreDetails = async function () {
     const name = document.getElementById('owner-store-name').value;
     const address = document.getElementById('owner-store-address').value;
+    const workerCount = Math.max(1, parseInt(document.getElementById('owner-store-workers').value) || 1);
     const lat = parseFloat(document.getElementById('owner-store-lat').value);
     const lng = parseFloat(document.getElementById('owner-store-lng').value);
 
-    // Only update these fields
     try {
         await updateDoc(doc(db, "merchants", currentUser.storeId), {
-            name, address, lat, lng
+            name, address, workerCount, lat, lng
         });
+        // Update local data too
+        const store = allMerchants.find(m => m.id === currentUser.storeId);
+        if (store) store.workerCount = workerCount;
         showToast('Store details updated!', 'success');
     } catch (e) {
         console.error(e);
