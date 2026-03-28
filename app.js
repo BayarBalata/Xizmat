@@ -3472,8 +3472,13 @@ window.saveOwnerStoreDetails = async function () {
     const name = document.getElementById('owner-store-name').value;
     const address = document.getElementById('owner-store-address').value;
     const workerCount = Math.max(1, parseInt(document.getElementById('owner-store-workers').value) || 1);
-    const lat = parseFloat(document.getElementById('owner-store-lat').value);
-    const lng = parseFloat(document.getElementById('owner-store-lng').value);
+    
+    let lat = parseFloat(document.getElementById('owner-store-lat').value);
+    let lng = parseFloat(document.getElementById('owner-store-lng').value);
+    
+    // Convert NaN to null so Firestore doesn't crash on invalid numbers
+    if (isNaN(lat)) lat = null;
+    if (isNaN(lng)) lng = null;
 
     try {
         await updateDoc(doc(db, "merchants", currentUser.storeId), {
