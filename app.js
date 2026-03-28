@@ -3469,28 +3469,56 @@ function renderOwnerServices(services) {
 }
 
 window.saveOwnerStoreDetails = async function () {
-    const name = document.getElementById('owner-store-name').value;
-    const address = document.getElementById('owner-store-address').value;
-    const workerCount = Math.max(1, parseInt(document.getElementById('owner-store-workers').value) || 1);
-    
-    let lat = parseFloat(document.getElementById('owner-store-lat').value);
-    let lng = parseFloat(document.getElementById('owner-store-lng').value);
-    
-    // Convert NaN to null so Firestore doesn't crash on invalid numbers
-    if (isNaN(lat)) lat = null;
-    if (isNaN(lng)) lng = null;
-
     try {
-        await updateDoc(doc(db, "merchants", currentUser.storeId), {
-            name, address, workerCount, lat, lng
-        });
+        const nameEle = document.getElementById('owner-store-name');
+        const addressEle = document.getElementById('owner-store-address');
+        const workersEle = document.getElementById('owner-store-workers');
+        const latEle = document.getElementById('owner-store-lat');
+        const lngEle = document.getElementById('owner-store-lng');
+
+        if (!nameEle || !workersEle) {
+            alert("Error: Critical form elements are missing from the page.");
+            return;
+        }
+
+        const name = nameEle.value;
+        const address = addressEle ? addressEle.value : '';
+        const workerCount = Math.max(1, parseInt(workersEle.value) || 1);
+        
+        const updatePayload = {
+            name: name,
+            address: address,
+            workerCount: workerCount
+        };
+
+        if (latEle && lngEle) {
+            let lat = parseFloat(latEle.value);
+            let lng = parseFloat(lngEle.value);
+            if (!isNaN(lat) && !isNaN(lng)) {
+                updatePayload.lat = lat;
+                updatePayload.lng = lng;
+            } else {
+                updatePayload.lat = null;
+                updatePayload.lng = null;
+            }
+        }
+
+        if (!currentUser || !currentUser.storeId) {
+            alert("Error: You are not linked to a store.");
+            return;
+        }
+
+        await updateDoc(doc(db, "merchants", currentUser.storeId), updatePayload);
+        
         // Update local data too
         const store = allMerchants.find(m => m.id === currentUser.storeId);
         if (store) store.workerCount = workerCount;
+        
         showToast('Store details updated!', 'success');
     } catch (e) {
-        console.error(e);
-        showToast('Failed to update store', 'error');
+        console.error("Save Error:", e);
+        alert('Failed to update store: ' + e.message);
+        showToast('Failed to update store: ' + e.message, 'error');
     }
 }
 
