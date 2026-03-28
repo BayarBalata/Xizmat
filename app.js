@@ -1270,6 +1270,7 @@ window.submitBooking = async function () {
             serviceDuration: totalDuration,
 
             bookingDate: bookingDateObj,
+            bookingTime: bookingState.time,
             status: 'pending',
             commission: commission,
             createdAt: new Date().toISOString()
@@ -3069,12 +3070,27 @@ async function loadOwnerBookings(status) {
         }
 
         tbody.innerHTML = bookings.map(b => {
-            const dateStr = b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : new Date(b.createdAt).toLocaleString();
+            const createdStr = b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : new Date(b.createdAt).toLocaleString();
+            // Show the actual appointment date and time
+            let appointmentStr = 'N/A';
+            if (b.bookingDate) {
+                const bDate = b.bookingDate?.toDate ? b.bookingDate.toDate() : new Date(b.bookingDate);
+                appointmentStr = bDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            }
+            const bookingTime = b.bookingTime || (b.bookingDate ? (() => {
+                const bDate = b.bookingDate?.toDate ? b.bookingDate.toDate() : new Date(b.bookingDate);
+                const h = bDate.getHours();
+                const m = bDate.getMinutes();
+                return `${h}:${m === 0 ? '00' : String(m).padStart(2, '0')}`;
+            })() : 'N/A');
             return `
             <tr>
                 <td>${b.customerName || 'Customer'}</td>
                 <td>${b.serviceName || 'Service'}</td>
-                <td>${dateStr}</td>
+                <td>
+                    <div>📅 ${appointmentStr}</div>
+                    <div style="font-size:0.8rem; color:#666;">🕐 ${bookingTime}</div>
+                </td>
                 <td>${(b.price || 0).toLocaleString()} IQD</td>
                 <td>
                     <span class="status-badge ${b.status}">
