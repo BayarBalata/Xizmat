@@ -61,78 +61,21 @@
 
     <!-- CUSTOMER DASHBOARD -->
     <main id="dashboard-customer">
-        <section id="home" class="hero serenity-hero">
-            <div class="hero-bg-overlay"></div>
-
-            <div class="photo-slider-wrapper">
-                <div class="photo-slider-track">
-                    <img src="https://images.unsplash.com/photo-1560066984-138dadb4c035?auto=format&fit=crop&w=1200&q=80"
-                        alt="Spa Resort">
-                    <img src="https://images.unsplash.com/photo-1516975080661-46bfa20281ba?auto=format&fit=crop&w=1200&q=80"
-                        alt="Nail Art">
-                    <img src="https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=1200&q=80"
-                        alt="Hair Salon">
-                    <img src="https://images.unsplash.com/photo-1600948836101-f9ff169a1c1b?auto=format&fit=crop&w=1200&q=80"
-                        alt="Luxury Spa">
-                    <img src="https://images.unsplash.com/photo-1596178065887-1198b6148b2b?auto=format&fit=crop&w=1200&q=80"
-                        alt="Skincare">
-                    <img src="https://images.unsplash.com/photo-1522337660859-02fbefca4702?auto=format&fit=crop&w=1200&q=80"
-                        alt="Beauty Products">
-                </div>
-            </div>
-
-            <div class="container hero-content" style="position: relative; z-index: 3;">
-                <div class="hero-icon" style="font-size: 2rem; color: #fcd2db; margin-bottom: 10px;"></div>
-                <h4 style="color: #fcd2db; margin-bottom: 15px; font-weight: 500;">Discover Your Natural Beauty
-                </h4>
-                <h1
-                    style="font-size: 3.5rem; color: #ffffff; margin-bottom: 20px; max-width: 800px; margin-left: auto; margin-right: auto; line-height: 1.2;">
-                    Experience luxury treatments and personalized care in our tranquil sanctuary.</h1>
-                <p style="font-size: 1.2rem; color: rgba(255,255,255,0.7); margin-bottom: 40px;">
-                    Where beauty meets
-                    wellness.</p>
-
-                <div class="hero-actions"
-                    style="display: flex; gap: 20px; justify-content: center; margin-bottom: 40px; margin-top: 40px;">
-                    <button class="btn-primary"
-                        onclick="document.getElementById('explore').scrollIntoView({behavior: 'smooth'})">Book
-                        Appointment</button>
-                    <button class="btn-outline" style="background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.5); color: white; backdrop-filter: blur(4px);"
-                        onclick="openServiceSearch()"> Find a Service</button>
-                </div>
-                <div class="search-bar serenity-search" style="max-width: 700px; padding: 12px; border-radius: 60px;">
-                    <input type="text" placeholder="Search for treatments (e.g. Facial, Massage)..."
-                        style="font-size: 1.1rem;">
-                    <button class="btn-primary" style="padding: 12px 30px;">Search</button>
-                </div>
+<!-- ABOUT SECTION -->
+        <section id="about" class="content-section" style="background:#fff; padding: 60px 0;">
+            <div class="container" style="max-width: 800px; text-align: center;">
+                <h2 style="font-size: 2.5rem; margin-bottom: 24px; color: var(--text-dark);">About Serenity Beauty</h2>
+                <p style="font-size: 1.1rem; color: #666; line-height: 1.6; margin-bottom: 20px;">
+                    Welcome to Serenity Beauty, your premier destination for finding and booking the best local beauty and wellness services. We believe that self-care should be simple, accessible, and delightful.
+                </p>
+                <p style="font-size: 1.1rem; color: #666; line-height: 1.6;">
+                    Whether you're looking for a quick haircut, a relaxing massage, or a full spa day, our platform connects you seamlessly with top-rated professionals in your area.
+                </p>
             </div>
         </section>
-        <!-- SPONSOR BANNER AREA -->
-        <section id="sponsor-banner" class="sponsor-section">
-            <div class="container">
-                <div class="sponsor-carousel" id="sponsor-carousel">
-                    <!-- Sponsors loaded via JS -->
-                </div>
-            </div>
-        </section>
-        <section id="explore" class="content-section">
-            <div class="container">
-                <div class="section-header">
-                    <h2>Top Rated Venues</h2>
-                    <div class="filters">
-                        <button class="filter-chip active" data-type="all">All</button>
-                        <button class="filter-chip" data-type="salon">Salons</button>
-                        <button class="filter-chip" data-type="beauty_center">Beauty Centers</button>
-                    </div>
-                </div>
 
-                <div id="merchants-grid" class="grid">
-                    <!-- Merchants loaded via JS -->
-                    <div class="loading-spinner">Loading...</div>
-                </div>
-            </div>
-        </section>
-    </main>
+        
+</main>
 
     <!-- OWNER DASHBOARD -->
     <main id="dashboard-owner" style="display: none;">

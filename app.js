@@ -1,6 +1,6 @@
 import { db, auth, storage } from "./firebase-config.js";
 import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
-import { RecaptchaVerifier, signInWithPhoneNumber, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+import { RecaptchaVerifier, signInWithPhoneNumber, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, EmailAuthProvider, reauthenticateWithCredential, updateEmail, updatePassword, updateProfile } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
 // DOM Elements
@@ -73,23 +73,15 @@ window.devLogin = async function (phone, password) {
         // Set current user
         currentUser = { id: snapshot.docs[0].id, ...userData };
 
-        // Update UI
-        document.getElementById('login-btn').style.display = 'none';
-        document.getElementById('user-profile').style.display = 'flex';
-        document.getElementById('user-name').textContent = currentUser.name || 'User';
+        // Centralized UI Update
+        updateUIForUser();
 
         // Close auth modal if open
         closeModal('auth-modal');
 
-        // Load role-specific dashboard
-        if (currentUser.role === 'admin') {
-            document.getElementById('dashboard-admin').style.display = 'block';
-            loadAdminDashboard();
-        } else if (currentUser.role === 'owner') {
-            loadOwnerDashboard();
-        }
+        console.log("DEV login successful for:", currentUser.role);
 
-        showToast(`Welcome back, ${currentUser.name}! 👋`, 'success');
+        showToast(`Welcome back, ${currentUser.name}! `, 'success');
 
     } catch (error) {
         console.error('Dev login error:', error);
@@ -241,7 +233,7 @@ function setupEventListeners() {
             if (pickerMarker) pickerMarker.setMap(null);
             document.getElementById('btn-confirm-location').style.display = 'none';
             const header = document.querySelector('.map-header h2');
-            if (header) header.innerText = '📍 Explore Stores in Erbil';
+            if (header) header.innerText = ' Explore Stores in Erbil';
         };
     }
 
@@ -386,22 +378,23 @@ function setupEventListeners() {
             }
 
             try {
-                // Login with Dummy Email
-                const email = phone + '@docbook.app';
-                await signInWithEmailAndPassword(auth, email, password);
-
-                // Fetch User Data from Firestore
+                // Fetch User Data from Firestore to get their active auth email
                 const userDoc = await checkUserExists(phone);
 
-                if (userDoc) {
-                    currentUser = userDoc;
-                    showToast('Welcome back, ' + currentUser.name + '!', 'success');
-                    localStorage.setItem('currentUser', JSON.stringify(currentUser));
-                    updateUIForUser();
-                    authModal.style.display = 'none';
-                } else {
-                    showToast('Account data not found.', 'error');
+                if (!userDoc) {
+                    showToast('Account data not found. Please sign up.', 'error');
+                    return;
                 }
+
+                // Login with their real email (if set) or fallback to default
+                const email = userDoc.email || phone + '@docbook.app';
+                await signInWithEmailAndPassword(auth, email, password);
+
+                currentUser = userDoc;
+                showToast('Welcome back, ' + currentUser.name + '!', 'success');
+                localStorage.setItem('currentUser', JSON.stringify(currentUser));
+                updateUIForUser();
+                authModal.style.display = 'none';
 
             } catch (error) {
                 console.error("Login Error:", error);
@@ -496,11 +489,34 @@ function updateUIForUser() {
         userNameSpan.textContent = currentUser.name;
     }
 
+    // Hide Main Nav Links and Map Button for non-customers
+    const mainNav = document.getElementById('main-nav-links');
+    const mapBtn = document.getElementById('map-btn');
+    if (currentUser.role === 'owner' || currentUser.role === 'admin') {
+        // Hard-remove elements to definitively hide them regardless of CSS cache or flexbox
+        if (mainNav) mainNav.remove(); 
+        if (mapBtn) mapBtn.remove();
+    } else {
+        // Customers and guests see these naturally.
+        if (mainNav) mainNav.style.display = 'flex';
+        if (mapBtn) mapBtn.style.display = 'block';
+    }
+
     // Redirect logic based on role
     if (currentUser.role === 'owner') {
-        loadOwnerDashboard();
+        const ownerDash = document.getElementById('dashboard-owner');
+        if (!ownerDash && !window.location.href.includes('index.html') && !window.location.pathname.endsWith('/')) {
+            window.location.href = 'index.html';
+        } else {
+            loadOwnerDashboard();
+        }
     } else if (currentUser.role === 'admin') {
-        loadAdminDashboard();
+        const adminDash = document.getElementById('dashboard-admin');
+        if (!adminDash && !window.location.href.includes('index.html') && !window.location.pathname.endsWith('/')) {
+            window.location.href = 'index.html';
+        } else {
+            loadAdminDashboard();
+        }
     } else {
         // Customer - Ensure customer view is shown and others hidden
         const custDash = document.getElementById('dashboard-customer');
@@ -540,7 +556,7 @@ async function loadMerchants() {
             </div>
         `;
     }
-    merchantsGrid.innerHTML = skeletonHTML;
+    if (merchantsGrid) merchantsGrid.innerHTML = skeletonHTML;
 
     try {
         const querySnapshot = await getDocs(collection(db, "merchants"));
@@ -551,7 +567,7 @@ async function loadMerchants() {
         renderMerchants();
     } catch (error) {
         console.error("Error loading merchants:", error);
-        merchantsGrid.innerHTML = '<div style="text-align:center">Failed to load data. Please ensure Firestore is enabled and seeded.</div>';
+        if (merchantsGrid) merchantsGrid.innerHTML = '<div style="text-align:center">Failed to load data. Please ensure Firestore is enabled and seeded.</div>';
     }
 }
 
@@ -562,15 +578,15 @@ function renderMerchants() {
         : allMerchants.filter(m => m.type === currentFilter);
 
     if (filtered.length === 0) {
-        merchantsGrid.innerHTML = '<div class="empty-state">No venues found.</div>';
+        if (merchantsGrid) merchantsGrid.innerHTML = '<div class="empty-state">No venues found.</div>';
         return;
     }
 
-    merchantsGrid.innerHTML = filtered.map(merchant => {
+    if (merchantsGrid) merchantsGrid.innerHTML = filtered.map(merchant => {
         // Check if merchant has a photo URL
         const imageContent = merchant.photoUrl
-            ? `<img src="${merchant.photoUrl}" alt="${merchant.name}" onerror="this.outerHTML='<span class=\\'emoji-fallback\\'>${merchant.image || '✨'}</span>'">`
-            : `<span class="emoji-fallback">${merchant.image || '✨'}</span>`;
+            ? `<img src="${merchant.photoUrl}" alt="${merchant.name}" onerror="this.outerHTML='<span class=\\'emoji-fallback\\'>${merchant.image || ''}</span>'">`
+            : `<span class="emoji-fallback">${merchant.image || ''}</span>`;
 
         // Check if this merchant has active offers
         const now = new Date();
@@ -586,18 +602,16 @@ function renderMerchants() {
         <div class="merchant-card" onclick="openMerchantDetails('${merchant.id}')">
             <div class="card-img-top">
                 ${imageContent}
-                ${hasDiscount ? `<div class="discount-badge">🔥 Up to ${maxDiscount}% OFF</div>` : ''}
+                ${hasDiscount ? `<div class="discount-badge"> Up to ${maxDiscount}% OFF</div>` : ''}
             </div>
             <div class="card-body">
                 <span class="card-tag">${merchant.category}</span>
                 <h3 class="card-title">${merchant.name}</h3>
                 <div class="card-meta">
-                    <span>⭐ ${merchant.rating}</span>
-                    <span>•</span>
-                    <span>📍 ${merchant.distance}</span>
+                    <span>${merchant.distance}</span>
                 </div>
                 <p style="color: #6b7280; font-size: 0.9rem;">${merchant.address}</p>
-                ${merchant.lat && merchant.lng ? `<span class="btn-map-link" onclick="event.stopPropagation(); showOnMap('${merchant.id}')">📍 View on Map</span>` : ''}
+                ${merchant.lat && merchant.lng ? `<span class="btn-map-link" onclick="event.stopPropagation(); showOnMap('${merchant.id}')"> View on Map</span>` : ''}
             </div>
         </div>
     `}).join('');
@@ -682,9 +696,12 @@ function addMarkersToMap() {
         const infoContent = `
             <div class="map-info-window">
                 <h3>${merchant.name}</h3>
-                <p><strong>${merchant.category}</strong></p>
-                <p>⭐ ${merchant.rating} • ${merchant.distance}</p>
-                <p>📍 ${merchant.address}</p>
+                <div class="merchant-header-info">
+                <h2>${merchant.name}</h2>
+                <div class="badge">${merchant.category}</div>
+                <p>${merchant.distance}</p>
+            </div>
+                <p> ${merchant.address}</p>
                 <button class="btn-primary" onclick="openMerchantDetails('${merchant.id}'); document.getElementById('map-modal').style.display='none';">
                     View Details
                 </button>
@@ -730,7 +747,7 @@ window.confirmRealBooking = async function (storeId, storeName, serviceName, pri
 
         await addDoc(collection(db, 'bookings'), bookingData);
 
-        showToast('Booking Confirmed! ✅', 'success');
+        showToast('Booking Confirmed! ', 'success');
         document.getElementById('booking-modal').style.display = 'none';
 
         // Refresh dashboard if admin is viewing
@@ -870,7 +887,7 @@ function renderBookingWizard() {
         content += renderBookingStep1();
         footer.innerHTML = `
             <button class="btn-outline" onclick="closeModal('booking-modal')">Cancel</button>
-            <button class="btn-primary" onclick="nextBookingStep()" ${bookingState.services.length === 0 ? 'disabled' : ''}>Next ➝</button>
+            <button class="btn-primary" onclick="nextBookingStep()" ${bookingState.services.length === 0 ? 'disabled' : ''}>Next </button>
         `;
     }
     // Step 2: Select Date & Time
@@ -878,7 +895,7 @@ function renderBookingWizard() {
         content += renderBookingStep2();
         footer.innerHTML = `
             <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
-            <button class="btn-primary" onclick="nextBookingStep()" ${!bookingState.date || !bookingState.time ? 'disabled' : ''}>Next ➝</button>
+            <button class="btn-primary" onclick="nextBookingStep()" ${!bookingState.date || !bookingState.time ? 'disabled' : ''}>Next </button>
         `;
     }
     // Step 3: Confirm
@@ -1102,7 +1119,7 @@ function renderBookingStep2() {
     let timesHtml = '';
     if (bookingState.date) {
         if (bookingState.bookedSlots === undefined) {
-            timesHtml = '<div class="booking-times-loading">⏳ Loading available times...</div>';
+            timesHtml = '<div class="booking-times-loading"> Loading available times...</div>';
         } else {
             const startHour = 10;
             const endHour = 20;
@@ -1125,11 +1142,11 @@ function renderBookingStep2() {
 
             timesHtml = `
                 <div class="booking-times-header">
-                    <h4>📅 ${new Date(bookingState.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</h4>
+                    <h4> ${new Date(bookingState.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</h4>
                     <div class="slots-summary">
-                        <span class="slots-available">✅ ${availCount} Open</span>
-                        ${fullyBookedCount > 0 ? `<span class="slots-booked">🚫 ${fullyBookedCount} Full</span>` : ''}
-                        ${workerCount > 1 ? `<span style="color:#666;font-size:0.75rem;">👷 ${workerCount} workers</span>` : ''}
+                        <span class="slots-available"> ${availCount} Open</span>
+                        ${fullyBookedCount > 0 ? `<span class="slots-booked"> ${fullyBookedCount} Full</span>` : ''}
+                        ${workerCount > 1 ? `<span style="color:#666;font-size:0.75rem;"> ${workerCount} workers</span>` : ''}
                     </div>
                 </div>
                 <div class="time-slots-grid">
@@ -1169,7 +1186,7 @@ function renderBookingStep2() {
 
         ${bookingState.date ? `<div class="booking-times-panel">${timesHtml}</div>` : `
             <div class="booking-times-placeholder">
-                <p>👆 Select a date on the calendar to see available time slots</p>
+                <p> Select a date on the calendar to see available time slots</p>
             </div>
         `}
     `;
@@ -1337,7 +1354,7 @@ window.submitBooking = async function () {
         // Invalidate booked slots cache so the slot shows as taken
         bookedSlotsCache = {};
 
-        showToast('Booking Request Sent! 🚀', 'success');
+        showToast('Booking Request Sent! ', 'success');
         document.getElementById('booking-modal').style.display = 'none';
 
         // Refresh if needed
@@ -1397,13 +1414,13 @@ async function loadAdminStores() {
                 <td>${store.address || 'N/A'}</td>
                 <td>
                     <span class="status-badge ${store.suspended ? 'suspended' : 'active'}">
-                        ${store.suspended ? '🔴 Suspended' : '🟢 Active'}
+                        ${store.suspended ? ' Suspended' : ' Active'}
                     </span>
                 </td>
                 <td>
-                    <button class="action-btn" onclick="editStore('${store.id}')">✏️ Edit</button>
+                    <button class="action-btn" onclick="editStore('${store.id}')">️ Edit</button>
                     <button class="action-btn ${store.suspended ? '' : 'danger'}" onclick="toggleSuspend('${store.id}', ${!store.suspended})">
-                        ${store.suspended ? '▶️ Activate' : '⏸️ Suspend'}
+                        ${store.suspended ? '▶️ Activate' : '️ Suspend'}
                     </button>
                 </td>
             </tr>
@@ -1516,7 +1533,7 @@ window.openLocationPicker = function () {
     const header = document.querySelector('.map-header h2');
     if (header) {
         header.dataset.originalText = header.innerText;
-        header.innerText = '📍 Click on Map to Select Location';
+        header.innerText = ' Click on Map to Select Location';
     }
 };
 
@@ -1578,8 +1595,8 @@ function renderServicesForReorder(services) {
                 <div class="service-meta">${s.duration} mins • ${s.price.toLocaleString()} IQD</div>
             </div>
             <div class="service-actions">
-                <button type="button" class="service-action-btn edit" onclick="openEditServiceModal(${i})" title="Edit Service">✏️</button>
-                <button type="button" class="service-action-btn delete" onclick="deleteService(${i})" title="Delete Service">🗑️</button>
+                <button type="button" class="service-action-btn edit" onclick="openEditServiceModal(${i})" title="Edit Service">️</button>
+                <button type="button" class="service-action-btn delete" onclick="deleteService(${i})" title="Delete Service">️</button>
             </div>
             <div class="service-order">${i + 1}</div>
         </div>
@@ -1696,7 +1713,7 @@ window.saveServicesOrder = async function () {
         // Update local data
         store.services = newServices;
 
-        showToast('✅ Services saved successfully!', 'success');
+        showToast(' Services saved successfully!', 'success');
         loadAdminStores();
         renderMerchants();
     } catch (error) {
@@ -1777,8 +1794,8 @@ document.getElementById('service-form')?.addEventListener('submit', function (e)
                     <div class="service-meta">${duration} mins • ${price.toLocaleString()} IQD</div>
                 </div>
                 <div class="service-actions">
-                    <button type="button" class="service-action-btn edit" onclick="openEditServiceModal(${newIndex})" title="Edit Service">✏️</button>
-                    <button type="button" class="service-action-btn delete" onclick="deleteService(${newIndex})" title="Delete Service">🗑️</button>
+                    <button type="button" class="service-action-btn edit" onclick="openEditServiceModal(${newIndex})" title="Edit Service">️</button>
+                    <button type="button" class="service-action-btn delete" onclick="deleteService(${newIndex})" title="Delete Service">️</button>
                 </div>
                 <div class="service-order">${newIndex + 1}</div>
             </div>
@@ -1918,7 +1935,7 @@ document.getElementById('store-form')?.addEventListener('submit', async (e) => {
         loadMerchants();
         loadAdminStores();
         loadMerchants();
-        showToast('✅ Store and services saved successfully!', 'success');
+        showToast(' Store and services saved successfully!', 'success');
 
     } catch (error) {
         console.error('Error saving store:', error);
@@ -1964,11 +1981,11 @@ async function loadAdminOffers() {
                 <td>${isExpired ? 'Ended' : `${daysLeft} days left`}</td>
                 <td>
                     <span class="status-badge ${isExpired ? 'expired' : 'active'}">
-                        ${isExpired ? '⚫ Expired' : '🟢 Active'}
+                        ${isExpired ? ' Expired' : ' Active'}
                     </span>
                 </td>
                 <td>
-                    <button class="action-btn danger" onclick="deleteOffer('${offer.id}')">🗑️ Delete</button>
+                    <button class="action-btn danger" onclick="deleteOffer('${offer.id}')">️ Delete</button>
                 </td>
             </tr>
         `}).join('');
@@ -2077,7 +2094,7 @@ async function loadAdminSponsors() {
                         <h4>${store?.name || 'Store'}</h4>
                         <p>${store?.category || ''}</p>
                     </div>
-                    <button class="action-btn danger" onclick="deleteSponsor('${s.id}')">🗑️</button>
+                    <button class="action-btn danger" onclick="deleteSponsor('${s.id}')">️</button>
                 </div>
             `;
         }).join('') : '<p class="sponsor-empty">No sponsored stores yet</p>';
@@ -2087,9 +2104,9 @@ async function loadAdminSponsors() {
                 <img src="${s.imageUrl || 'https://via.placeholder.com/60'}" alt="">
                 <div class="sponsored-item-info">
                     <h4>${s.title || 'Advertisement'}</h4>
-                    <p><a href="${s.linkUrl}" target="_blank">🔗 ${s.linkUrl?.substring(0, 30)}...</a></p>
+                    <p><a href="${s.linkUrl}" target="_blank"> ${s.linkUrl?.substring(0, 30)}...</a></p>
                 </div>
-                <button class="action-btn danger" onclick="deleteSponsor('${s.id}')">🗑️</button>
+                <button class="action-btn danger" onclick="deleteSponsor('${s.id}')">️</button>
             </div>
         `).join('') : '<p class="sponsor-empty">No external ads yet</p>';
 
@@ -2181,14 +2198,14 @@ async function loadSponsorsForCustomer() {
         });
 
         if (activeSponsors.length === 0) {
-            sponsorCarousel.innerHTML = '';
+            if (sponsorCarousel) sponsorCarousel.innerHTML = '';
             sponsorCarousel.parentElement.parentElement.style.display = 'none';
             return;
         }
 
         sponsorCarousel.parentElement.parentElement.style.display = 'block';
 
-        sponsorCarousel.innerHTML = activeSponsors.map(sponsor => {
+        if (sponsorCarousel) sponsorCarousel.innerHTML = activeSponsors.map(sponsor => {
             if (sponsor.type === 'store') {
                 const store = allMerchants.find(m => m.id === sponsor.storeId);
                 if (!store) return '';
@@ -2197,7 +2214,7 @@ async function loadSponsorsForCustomer() {
                         <img src="${store.photoUrl || 'https://via.placeholder.com/320x140'}" alt="${store.name}">
                         <div class="sponsor-card-body">
                             <h4>${store.name}</h4>
-                            <p>📍 ${store.address || store.category}</p>
+                            <p> ${store.address || store.category}</p>
                         </div>
                     </div>
                 `;
@@ -2207,7 +2224,7 @@ async function loadSponsorsForCustomer() {
                         <img src="${sponsor.imageUrl || 'https://via.placeholder.com/320x140'}" alt="${sponsor.title}">
                         <div class="sponsor-card-body">
                             <h4>${sponsor.title || 'Special Offer'}</h4>
-                            <p>🔗 Learn More</p>
+                            <p> Learn More</p>
                         </div>
                     </a>
                 `;
@@ -2216,7 +2233,7 @@ async function loadSponsorsForCustomer() {
 
     } catch (error) {
         console.error('Error loading sponsors:', error);
-        sponsorCarousel.innerHTML = '';
+        if (sponsorCarousel) sponsorCarousel.innerHTML = '';
     }
 }
 
@@ -2344,16 +2361,16 @@ async function loadFinancials(filter = currentFinancialFilter) {
 
         if (isPaid) {
             statusBadgeClass = 'paid';
-            statusText = '✓ Paid';
+            statusText = ' Paid';
         } else if (booking.status === 'completed') {
             statusBadgeClass = 'completed'; // You might need to add this class in CSS if not exists, or use 'paid' style
-            statusText = '🏁 Completed (Unpaid)';
+            statusText = ' Completed (Unpaid)';
         } else if (booking.status === 'confirmed') {
             statusBadgeClass = 'active';
-            statusText = '📅 Confirmed';
+            statusText = ' Confirmed';
         } else {
             statusBadgeClass = 'pending-payment';
-            statusText = '⏳ Pending';
+            statusText = ' Pending';
         }
 
         return `
@@ -2370,7 +2387,7 @@ async function loadFinancials(filter = currentFinancialFilter) {
             </td>
             <td>
                 ${booking.status === 'completed' && !isPaid ?
-                `<button class="action-btn" onclick="viewInvoice(${index})">📄 Invoice</button>` :
+                `<button class="action-btn" onclick="viewInvoice(${index})"> Invoice</button>` :
                 '-'}
             </td>
         </tr>
@@ -2632,7 +2649,7 @@ function renderInvoiceLists() {
                 </div>
                 <div class="invoice-card-actions">
                     <button class="action-btn" onclick="viewSavedInvoice('${inv.id}')">View</button>
-                    <button class="action-btn" onclick="markInvoicePaidById('${inv.id}')">✓ Paid</button>
+                    <button class="action-btn" onclick="markInvoicePaidById('${inv.id}')"> Paid</button>
                 </div>
             </div>
         `).join('');
@@ -2859,7 +2876,7 @@ function renderUsersTable() {
                 <td>${storeName}</td>
                 <td>${joinDate}</td>
                 <td>
-                    <button class="action-btn" onclick="openEditUserModal('${user.phone || user.id}')">✏️ Edit Role</button>
+                    <button class="action-btn" onclick="openEditUserModal('${user.phone || user.id}')">️ Edit Role</button>
                     <!-- <button class="action-btn danger">Ban</button> --> 
                 </td>
             </tr>
@@ -2978,7 +2995,7 @@ window.loadOwnerDashboard = async function () {
     // Update Store Badge
     const store = allMerchants.find(m => m.id === currentUser.storeId);
     if (store) {
-        document.getElementById('owner-store-badge').innerText = `🏪 ${store.name}`;
+        document.getElementById('owner-store-badge').innerText = ` ${store.name}`;
     }
 
     // Setup Owner Tab Switching
@@ -3144,8 +3161,8 @@ async function loadOwnerBookings(status) {
                 <td>${b.customerName || 'Customer'}</td>
                 <td>${b.serviceName || 'Service'}</td>
                 <td>
-                    <div>📅 ${appointmentStr}</div>
-                    <div style="font-size:0.8rem; color:#666;">🕐 ${bookingTime}</div>
+                    <div> ${appointmentStr}</div>
+                    <div style="font-size:0.8rem; color:#666;"> ${bookingTime}</div>
                 </td>
                 <td>${(b.price || 0).toLocaleString()} IQD</td>
                 <td>
@@ -3155,10 +3172,10 @@ async function loadOwnerBookings(status) {
                 </td>
                 <td>
                     ${b.status === 'pending' ? `
-                        <button class="action-btn" onclick="updateBookingStatus('${b.id}', 'confirmed')">✅ Accept</button>
-                        <button class="action-btn danger" onclick="updateBookingStatus('${b.id}', 'cancelled')">❌ Reject</button>
+                        <button class="action-btn" onclick="updateBookingStatus('${b.id}', 'confirmed')"> Accept</button>
+                        <button class="action-btn danger" onclick="updateBookingStatus('${b.id}', 'cancelled')"> Reject</button>
                     ` : b.status === 'confirmed' ? `
-                        <button class="action-btn" onclick="updateBookingStatus('${b.id}', 'completed')">🏁 Complete</button>
+                        <button class="action-btn" onclick="updateBookingStatus('${b.id}', 'completed')"> Complete</button>
                     ` : ''}
                 </td>
             </tr>
@@ -3223,7 +3240,7 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
             };
 
             await addDoc(collection(db, "storeCalendar"), calendarEvent);
-            showToast('✅ Booking Confirmed & Added to Calendar!', 'success');
+            showToast(' Booking Confirmed & Added to Calendar!', 'success');
         } else if (newStatus === 'cancelled') {
             // Remove from calendar if exists
             const calQ = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
@@ -3231,7 +3248,7 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
             calSnap.forEach(async (d) => {
                 await deleteDoc(doc(db, "storeCalendar", d.id));
             });
-            showToast('❌ Booking Declined', 'info');
+            showToast(' Booking Declined', 'info');
         } else if (newStatus === 'completed') {
             // Update calendar event status
             const calQ = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
@@ -3301,7 +3318,7 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
                     console.error('Error adding transaction:', err);
                 }
 
-                showToast(`🏁 Complete! +${servicePrice.toLocaleString()} IQD Revenue`, 'success');
+                showToast(` Complete! +${servicePrice.toLocaleString()} IQD Revenue`, 'success');
 
                 // Refresh financials tab if visible
                 if (document.getElementById('owner-financials').style.display !== 'none') {
@@ -3414,7 +3431,7 @@ function openCalendarDayModal(bookings, dateString) {
     // Create modal content
     let modalContent = `
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <h2 style="margin: 0;">📅 ${dateString}</h2>
+            <h2 style="margin: 0;"> ${dateString}</h2>
             <span class="close-modal" onclick="closeModal('calendar-day-modal')">&times;</span>
         </div>
     `;
@@ -3422,7 +3439,7 @@ function openCalendarDayModal(bookings, dateString) {
     if (bookings.length === 0) {
         modalContent += `
             <div style="text-align: center; padding: 40px; color: #888;">
-                <span style="font-size: 3rem;">📭</span>
+                <span style="font-size: 3rem;"></span>
                 <p>No bookings for this day.</p>
             </div>
         `;
@@ -3444,16 +3461,16 @@ function openCalendarDayModal(bookings, dateString) {
                     <div>
                         <strong style="font-size: 1.1rem;">${b.serviceName || 'Service'}</strong>
                         <div style="margin-top: 8px;">
-                            <span style="color: #666;">👤 Customer:</span> <strong>${b.customerName || 'N/A'}</strong>
+                            <span style="color: #666;"> Customer:</span> <strong>${b.customerName || 'N/A'}</strong>
                         </div>
                         <div style="margin-top: 4px;">
-                            <span style="color: #666;">📞 Phone:</span> ${b.customerPhone || 'N/A'}
+                            <span style="color: #666;"> Phone:</span> ${b.customerPhone || 'N/A'}
                         </div>
                         <div style="margin-top: 4px;">
-                            <span style="color: #666;">🕐 Time:</span> <strong>${bookingTime}</strong>
+                            <span style="color: #666;"> Time:</span> <strong>${bookingTime}</strong>
                         </div>
                         <div style="margin-top: 4px;">
-                            <span style="color: #666;">💰 Price:</span> ${(b.price || 0).toLocaleString()} IQD
+                            <span style="color: #666;"> Price:</span> ${(b.price || 0).toLocaleString()} IQD
                         </div>
                         <div style="margin-top: 4px; font-size: 0.8rem; color: #888;">
                             Booked: ${dateStr}
@@ -3465,12 +3482,12 @@ function openCalendarDayModal(bookings, dateString) {
                 </div>
                 ${b.status === 'pending' ? `
                 <div style="margin-top: 12px; display: flex; gap: 8px;">
-                    <button class="btn-primary" style="padding: 6px 16px; font-size: 0.85rem;" onclick="updateBookingStatus('${b.id}', 'confirmed')">✅ Accept</button>
-                    <button class="btn-outline" style="padding: 6px 16px; font-size: 0.85rem; border-color: #ef4444; color: #ef4444;" onclick="updateBookingStatus('${b.id}', 'cancelled')">❌ Reject</button>
+                    <button class="btn-primary" style="padding: 6px 16px; font-size: 0.85rem;" onclick="updateBookingStatus('${b.id}', 'confirmed')"> Accept</button>
+                    <button class="btn-outline" style="padding: 6px 16px; font-size: 0.85rem; border-color: #ef4444; color: #ef4444;" onclick="updateBookingStatus('${b.id}', 'cancelled')"> Reject</button>
                 </div>
                 ` : b.status === 'confirmed' ? `
                 <div style="margin-top: 12px;">
-                    <button class="btn-primary" style="padding: 6px 16px; font-size: 0.85rem;" onclick="updateBookingStatus('${b.id}', 'completed')">🏁 Mark Complete</button>
+                    <button class="btn-primary" style="padding: 6px 16px; font-size: 0.85rem;" onclick="updateBookingStatus('${b.id}', 'completed')"> Mark Complete</button>
                 </div>
                 ` : ''}
             </div>
@@ -3517,8 +3534,8 @@ function renderOwnerServices(services) {
                 <div class="service-meta">${s.duration} mins • ${s.price.toLocaleString()} IQD</div>
             </div>
              <div class="service-actions">
-                <button type="button" class="service-action-btn edit" onclick="editOwnerService(${i})">✏️</button>
-                <button type="button" class="service-action-btn delete" onclick="deleteOwnerService(${i})">🗑️</button>
+                <button type="button" class="service-action-btn edit" onclick="editOwnerService(${i})">️</button>
+                <button type="button" class="service-action-btn delete" onclick="deleteOwnerService(${i})">️</button>
             </div>
         </div>
     `).join('');
@@ -3626,7 +3643,7 @@ async function loadOwnerFinancials() {
                     <div class="invoice-card-amount">
                         <div class="amount">${(inv.commission || 0).toLocaleString()} IQD</div>
                         ${inv.isPaid
-                    ? '<div class="date" style="color: green;">✓ Paid</div>'
+                    ? '<div class="date" style="color: green;"> Paid</div>'
                     : '<div class="date" style="color: var(--primary);">Due</div>'}
                     </div>
                      <div class="invoice-card-actions">
@@ -3826,37 +3843,37 @@ async function saveOwnerService(e) {
 
 const SERVICE_CATEGORIES = [
     {
-        name: 'Nails 💅',
+        name: 'Nails ',
         key: 'nails',
         subServices: ['Nail Polish', 'Gel Nails', 'Acrylic Nails', 'Manicure', 'Pedicure', 'Nail Art', 'French Tips', 'Nail Extensions']
     },
     {
-        name: 'Hair 💇',
+        name: 'Hair ',
         key: 'hair',
         subServices: ['Haircut', 'Hair Color', 'Highlights', 'Keratin Treatment', 'Hair Blowout', 'Balayage', 'Hair Extensions', 'Hair Treatment']
     },
     {
-        name: 'Skin & Glow ✨',
+        name: 'Skin & Glow ',
         key: 'skin',
         subServices: ['Facial', 'Deep Cleansing', 'Chemical Peel', 'Microdermabrasion', 'Hydrafacial', 'Anti-Aging Treatment', 'Skin Brightening', 'Acne Treatment']
     },
     {
-        name: 'Massage 💆',
+        name: 'Massage ',
         key: 'massage',
         subServices: ['Swedish Massage', 'Deep Tissue Massage', 'Hot Stone Massage', 'Aromatherapy', 'Couple Massage', 'Back Massage', 'Foot Massage', 'Head Massage']
     },
     {
-        name: 'Makeup 💄',
+        name: 'Makeup ',
         key: 'makeup',
         subServices: ['Full Makeup', 'Natural Makeup', 'Bridal Makeup', 'Party Makeup', 'Eyeshadow', 'Eyelashes', 'Contouring', 'Airbrush Makeup']
     },
     {
-        name: 'Brows & Lashes 👁️',
+        name: 'Brows & Lashes ️',
         key: 'brows',
         subServices: ['Eyebrow Threading', 'Eyebrow Tinting', 'Eyebrow Lamination', 'Lash Lift', 'Lash Extensions', 'Lash Tint', 'HD Brows']
     },
     {
-        name: 'Laser & Aesthetics 🔬',
+        name: 'Laser & Aesthetics ',
         key: 'laser',
         subServices: ['Laser Hair Removal', 'Botox', 'Filler', 'PRP', 'Carbon Peel', 'Mesotherapy', 'RF Lifting']
     },
@@ -3921,7 +3938,7 @@ function renderServiceSearchStep(step) {
             </div>
             <p style="color: var(--text-light); font-size: 0.8rem; text-align: center; margin-top: 10px;">Leave empty to see all salons offering this service</p>
             <button class="btn-primary" style="width: 100%; margin-top: 24px;" onclick="applyServiceBudgetFilter()">
-                🔍 Search Salons
+                 Search Salons
             </button>
         `;
         // Allow pressing Enter to search
@@ -3933,7 +3950,7 @@ function renderServiceSearchStep(step) {
         // Show loading state while searching
         body.innerHTML = `
             <div style="text-align:center; padding:60px 0;">
-                <div style="font-size:2rem; margin-bottom:12px;">🔍</div>
+                <div style="font-size:2rem; margin-bottom:12px;"></div>
                 <p style="color: var(--text-light);">Searching salons...</p>
             </div>
         `;
@@ -3981,7 +3998,7 @@ function renderServiceSearchResults() {
             <h2 style="margin-bottom:6px;">${selectedSubService}</h2>
             <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}</p>
             <div class="empty-state" style="padding: 40px 0;">
-                <div style="font-size:3rem; margin-bottom:12px;">😔</div>
+                <div style="font-size:3rem; margin-bottom:12px;"></div>
                 <p>No salons found for this service${budget ? ' in your budget' : ''}.</p>
                 <button class="btn-outline" style="margin-top:16px;" onclick="renderServiceSearchStep('budget')">Try a higher budget</button>
             </div>
@@ -3997,13 +4014,13 @@ function renderServiceSearchResults() {
             ${results.map(({ merchant, service }) => {
                 const imageContent = merchant.photoUrl
                     ? `<img src="${merchant.photoUrl}" alt="${merchant.name}">`
-                    : `<span style="font-size:2.5rem;">${merchant.image || '✨'}</span>`;
+                    : `<span style="font-size:2.5rem;">${merchant.image || ''}</span>`;
                 return `
                 <div class="service-result-card" onclick="openMerchantDetails('${merchant.id}'); closeModal('service-search-modal');">
                     <div class="service-result-img">${imageContent}</div>
                     <div class="service-result-info">
                         <div class="service-result-name">${merchant.name}</div>
-                        <div class="service-result-meta">⭐ ${merchant.rating} · 📍 ${merchant.address}</div>
+                        <div class="service-result-meta"> ${merchant.address}</div>
                         <div class="service-result-service">
                             <span>${service.name}</span>
                             <span class="service-result-price">${service.price.toLocaleString()} IQD</span>
@@ -4024,3 +4041,180 @@ function renderServiceSearchResults() {
 // Start
 init();
 initDarkMode();
+
+/* =========================================
+   CUSTOMER PROFILE MANAGEMENT
+========================================= */
+
+window.openCustomerProfile = async function() {
+    if (!currentUser) return;
+    document.getElementById('profile-name').value = currentUser.name || '';
+    document.getElementById('profile-phone').value = currentUser.phone || '';
+    document.getElementById('profile-email').value = currentUser.email || '';
+    
+    // Clear password fields
+    document.getElementById('profile-curr-pass').value = '';
+    document.getElementById('profile-new-pass').value = '';
+
+    switchProfileTab('personal');
+    document.getElementById('customer-profile-modal').style.display = 'flex';
+};
+
+window.switchProfileTab = function(tabName) {
+    // Hide all tabs
+    document.getElementById('profile-tab-personal').style.display = 'none';
+    document.getElementById('profile-tab-security').style.display = 'none';
+    document.getElementById('profile-tab-history').style.display = 'none';
+
+    // Remove active styles
+    document.getElementById('profile-tab-btn-personal').classList.remove('active');
+    document.getElementById('profile-tab-btn-security').classList.remove('active');
+    document.getElementById('profile-tab-btn-history').classList.remove('active');
+
+    // Show selected
+    document.getElementById(`profile-tab-${tabName}`).style.display = 'block';
+    document.getElementById(`profile-tab-btn-${tabName}`).classList.add('active');
+
+    if (tabName === 'history') {
+        loadCustomerHistory();
+    }
+};
+
+// 1. Personal Info Form
+const profilePersonalForm = document.getElementById('profile-personal-form');
+if (profilePersonalForm) {
+    profilePersonalForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const newName = document.getElementById('profile-name').value.trim();
+        const newEmail = document.getElementById('profile-email').value.trim();
+        const submitBtn = profilePersonalForm.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        
+        try {
+            // Update Auth Email if it changed and exists
+            if (newEmail && newEmail !== currentUser.email && auth.currentUser) {
+                await updateEmail(auth.currentUser, newEmail);
+            }
+            
+            // Update Firestore Profile
+            const userRef = doc(db, 'users', currentUser.phone);
+            await updateDoc(userRef, {
+                name: newName,
+                email: newEmail
+            });
+
+            // Update local state
+            currentUser.name = newName;
+            currentUser.email = newEmail;
+            localStorage.setItem('currentUser', JSON.stringify(currentUser));
+            updateUIForUser();
+            
+            showToast('Profile updated successfully!', 'success');
+        } catch (error) {
+            console.error(error);
+            if (error.code === 'auth/requires-recent-login') {
+                showToast('Email change requires recent login. Please logout and login again.', 'error');
+            } else {
+                showToast('Error updating profile: ' + error.message, 'error');
+            }
+        } finally {
+            submitBtn.disabled = false;
+        }
+    };
+}
+
+// 2. Security (Password) Form
+const profileSecurityForm = document.getElementById('profile-security-form');
+if (profileSecurityForm) {
+    profileSecurityForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const currentPass = document.getElementById('profile-curr-pass').value;
+        const newPass = document.getElementById('profile-new-pass').value;
+        const submitBtn = profileSecurityForm.querySelector('button[type="submit"]');
+        
+        if (newPass.length < 6) {
+            showToast('New password must be at least 6 characters.', 'error');
+            return;
+        }
+
+        submitBtn.disabled = true;
+
+        try {
+            // Re-authenticate user before changing password
+            const userEmail = currentUser.email || currentUser.phone + '@docbook.app';
+            const credential = EmailAuthProvider.credential(userEmail, currentPass);
+            await reauthenticateWithCredential(auth.currentUser, credential);
+            
+            // Update Password
+            await updatePassword(auth.currentUser, newPass);
+            
+            document.getElementById('profile-curr-pass').value = '';
+            document.getElementById('profile-new-pass').value = '';
+            showToast('Password updated successfully!', 'success');
+        } catch (error) {
+            console.error(error);
+            if (error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+                showToast('Incorrect current password.', 'error');
+            } else {
+                showToast('Error updating password: ' + error.message, 'error');
+            }
+        } finally {
+            submitBtn.disabled = false;
+        }
+    };
+}
+
+// 3. Load Visit History
+async function loadCustomerHistory() {
+    const listContainer = document.getElementById('customer-visit-history');
+    listContainer.innerHTML = '<p>Loading your history...</p>';
+    
+    try {
+        const q = query(collection(db, 'bookings'), where('customerPhone', '==', currentUser.phone), orderBy('createdAt', 'desc'));
+        const snapshot = await getDocs(q);
+        
+        if (snapshot.empty) {
+            listContainer.innerHTML = '<div style="text-align: center; padding: 32px; background: #f9f9f9; border-radius: 8px;"><p style="color: #666; margin: 0;">No visit history found.</p></div>';
+            return;
+        }
+        
+        listContainer.innerHTML = '';
+        snapshot.forEach(docSnap => {
+            const b = docSnap.data();
+            const dateObj = typeof b.bookingDate === 'string' ? new Date(b.bookingDate) : b.bookingDate.toDate();
+            
+            // Format status colors correctly
+            let bgColor = '#f3f4f6';
+            let textColor = '#4b5563';
+            if (b.status === 'confirmed') { bgColor = '#dbeafe'; textColor = '#2563eb'; }
+            if (b.status === 'completed') { bgColor = '#d1fae5'; textColor = '#059669'; }
+            if (b.status === 'cancelled' || b.status === 'canceled') { bgColor = '#fee2e2'; textColor = '#dc2626'; }
+            if (b.status === 'pending') { bgColor = '#fef3c7'; textColor = '#d97706'; }
+            
+            const card = document.createElement('div');
+            card.style.cssText = 'background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 8px;';
+            card.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                    <div>
+                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">${b.storeName}</h4>
+                        <p style="margin: 4px 0 0 0; color: #4b5563; font-size: 0.95rem;">${b.serviceName} &bull; ${b.servicePrice.toLocaleString()} IQD</p>
+                    </div>
+                    <span style="background: ${bgColor}; color: ${textColor}; padding: 4px 12px; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; text-transform: capitalize;">
+                        ${b.status}
+                    </span>
+                </div>
+                <div style="font-size: 0.85rem; color: #6b7280; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #f3f4f6; padding-top: 8px; margin-top: 8px;">
+                    <span>Visit Date:</span>
+                    <span style="font-weight: 500;">
+                        ${dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                    </span>
+                </div>
+            `;
+            listContainer.appendChild(card);
+        });
+        
+    } catch (error) {
+        console.error("Error fetching history:", error);
+        listContainer.innerHTML = '<p style="color: red;">Failed to load history.</p>';
+    }
+}
