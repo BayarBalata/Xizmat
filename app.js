@@ -838,14 +838,32 @@ window.openMerchantDetails = function (id, preselectedServiceJson = null) {
 function renderBookingWizard() {
     const body = document.getElementById('booking-modal-body');
     const footer = document.getElementById('booking-modal-footer');
+    
+    // Hide default close button for step 3 if we want to show our own top bar
+    const defaultCloseBtn = document.querySelector('.close-booking');
+    if (defaultCloseBtn) {
+        defaultCloseBtn.style.display = bookingState.step === 3 ? 'none' : 'block';
+    }
 
-    // Header (Static for all steps)
-    let content = `
-        <div class="modal-header" style="text-align: center; margin-bottom: 20px;">
-            <h2 style="margin-bottom: 5px;">${bookingState.merchant.name}</h2>
-            <p style="color: #666;">Step ${bookingState.step} of 3</p>
-        </div>
-    `;
+    let content = '';
+
+    if (bookingState.step === 3) {
+        // Step 3 specific top bar
+        content += `
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #f0f0f0; padding-bottom: 15px; margin-bottom: 20px;">
+                <h3 style="margin: 0; font-weight: 700; font-size: 1.1rem; color: #333;">Book Appointment</h3>
+                <span style="font-size: 1.5rem; cursor: pointer; color: #888; line-height: 1;" onclick="closeModal('booking-modal')">&times;</span>
+            </div>
+        `;
+    } else {
+        // Header (Static for steps 1 and 2)
+        content += `
+            <div class="modal-header" style="text-align: center; margin-bottom: 20px;">
+                <h2 style="margin-bottom: 5px;">${bookingState.merchant.name}</h2>
+                <p style="color: #666;">Step ${bookingState.step} of 2</p>
+            </div>
+        `;
+    }
 
     // Step 1: Select Services
     if (bookingState.step === 1) {
@@ -867,8 +885,7 @@ function renderBookingWizard() {
     else if (bookingState.step === 3) {
         content += renderBookingStep3();
         footer.innerHTML = `
-            <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
-            <button class="btn-primary" onclick="submitBooking()" style="background: #059669;">Confirm Booking ✅</button>
+            <button class="btn-primary full-width" onclick="submitBooking()" style="background: #C19A6B; border: none; font-size: 1.05rem; padding: 14px; border-radius: 8px; font-weight: 500;">Confirm Booking</button>
         `;
     }
 
@@ -1182,31 +1199,67 @@ window.selectBookingTime = function (timeStr) {
 // --- STEP 3: CONFIRM ---
 function renderBookingStep3() {
     const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
+    const totalDuration = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
+    const serviceNames = bookingState.services.map(s => s.name).join(', ');
 
-    const servicesSummary = bookingState.services.map(s => `
-        <div class="booking-detail-item">
-            <span>${s.name}</span>
-            <span>${s.price.toLocaleString()} IQD</span>
-        </div>
-    `).join('');
+    // Date formatting (e.g., "Tue, Mar 31")
+    let dateStr = bookingState.date;
+    try {
+        const d = new Date(bookingState.date);
+        if (!isNaN(d.getTime())) {
+            dateStr = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+        }
+    } catch(e) {}
 
     return `
-        <h3 style="margin-bottom: 15px;">Confirm Details</h3>
-        <div class="booking-summary">
-            <div class="booking-detail-item">
-                <strong style="color: #666;">Date & Time</strong>
-                <strong>${bookingState.date}, ${bookingState.time}</strong>
+        <div style="text-align: left; margin-bottom: 20px;">
+            <button class="btn-text" style="color: #888; font-size: 0.95rem; padding: 0; background: none; border: none; cursor: pointer; display: flex; align-items: center; gap: 4px;" onclick="prevBookingStep()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+                Back
+            </button>
+        </div>
+
+        <div style="display: flex; flex-direction: column; align-items: center; margin-bottom: 24px;">
+            <div style="background: #F0F9F4; color: #4CAF50; width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 16px;">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
             </div>
-            <div style="margin-top: 15px; margin-bottom: 5px; font-weight: 600; color: #666;">Services</div>
-            ${servicesSummary}
-            <div class="booking-total">
-                <span>Total Amount:</span>
-                <span style="color: var(--primary);">${totalCost.toLocaleString()} IQD</span>
+            <h2 style="margin-bottom: 8px; font-weight: 700; color: #222; font-size: 1.4rem;">Confirm Your Booking</h2>
+            <p style="color: #888; font-size: 0.95rem; margin: 0;">Please review your appointment details</p>
+        </div>
+
+        <div style="background: #FAFAFA; border-radius: 12px; padding: 24px; margin-bottom: 24px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                <span style="color: #888; font-size: 0.95rem;">Salon</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem; text-align: right; max-width: 60%;">${bookingState.merchant.name}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                <span style="color: #888; font-size: 0.95rem;">Service</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem; text-align: right; max-width: 60%;">${serviceNames}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                <span style="color: #888; font-size: 0.95rem;">Duration</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${totalDuration} minutes</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                <span style="color: #888; font-size: 0.95rem;">Date</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${dateStr}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                <span style="color: #888; font-size: 0.95rem;">Time</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${bookingState.time}</span>
+            </div>
+            
+            <div style="height: 1px; background: #EBEBEB; margin: 20px 0;"></div>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0;">
+                <span style="color: #888; font-size: 0.95rem;">Total</span>
+                <span style="color: #C19A6B; font-weight: 700; font-size: 1.2rem;">${totalCost.toLocaleString()} IQD</span>
             </div>
         </div>
-        <p style="text-align: center; margin-top: 15px; font-size: 0.9rem; color: #666;">
-            Payment will be collected at the venue.
-        </p>
     `;
 }
 
