@@ -1234,7 +1234,10 @@ function renderBookingStep3() {
         <div style="background: #FAFAFA; border-radius: 12px; padding: 24px; margin-bottom: 24px;">
             <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
                 <span style="color: #888; font-size: 0.95rem;">Salon</span>
-                <span style="color: #333; font-weight: 500; font-size: 0.95rem; text-align: right; max-width: 60%;">${bookingState.merchant.name}</span>
+                <div style="text-align: right; max-width: 60%;">
+                    <div style="color: #333; font-weight: 500; font-size: 0.95rem;">${bookingState.merchant.name}</div>
+                    ${bookingState.merchant.address ? `<div style="color: #888; font-size: 0.8rem; margin-top: 2px;">${bookingState.merchant.address}</div>` : ''}
+                </div>
             </div>
             <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
                 <span style="color: #888; font-size: 0.95rem;">Service</span>
