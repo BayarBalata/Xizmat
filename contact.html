@@ -4,11 +4,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DocBook - Beauty Salon & Center Booking</title>
-    <link rel="stylesheet" href="style.css?v=1.3">
+    <title>Contact Us - Hewrina</title>
+    <meta name="description" content="Get in touch with Hewrina. We're here to help with bookings, partnerships, and any questions about our beauty platform.">
+    <link rel="stylesheet" href="style.css?v=1.4">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script type="module" src="firebase-config.js"></script>
-    <script type="module" src="app.js?v=3.5"></script>
+    <script type="module" src="app.js?v=3.6"></script>
     <!-- Google Maps API -->
     <script async defer
         src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAfPTJjw9HiF5yc99hn3SyRSpNVfB2wmMk&callback=initMapCallback"></script>
@@ -17,19 +18,19 @@
 <body>
     <header style="padding: 10px 0;">
         <div class="container" style="display: flex; justify-content: space-between; align-items: center;">
-            <div class="logo" style="color: var(--primary);">Serenity Beauty </div>
+            <a href="index.html" class="logo" style="color: var(--primary); text-decoration: none;">Hewrina</a>
             <nav id="main-nav-links" style="display: flex; gap: 30px; align-items: center; justify-content: center; flex: 1;">
                 <a href="index.html" class="nav-link">Home</a>
                 <a href="about.html" class="nav-link">About</a>
-                <a href="contact.html" class="nav-link">Contact Us</a>
+                <a href="contact.html" class="nav-link active">Contact Us</a>
             </nav>
             <div class="header-actions" style="display: flex; gap: 15px; align-items: center;">
-                <button id="map-btn" class="btn-outline" style="padding: 10px 20px;"> Map</button>
+                <button id="map-btn" class="btn-outline" style="padding: 10px 20px;">Map</button>
                 <button id="login-btn" class="btn-primary">Book Now</button>
                 <div id="user-profile" class="user-dropdown-container"
                     style="display: none; align-items: center; gap: 8px;" onclick="toggleUserDropdown()">
                     <span id="user-name" style="font-weight: 500;"></span>
-                    <span style="font-size: 0.8rem;">▼</span>
+                    <span style="font-size: 0.8rem;">&#9660;</span>
 
                     <div id="user-dropdown-menu" class="dropdown-menu">
                         <!-- Dark Mode Toggle -->
@@ -55,35 +56,142 @@
                         </div>
                     </div>
                 </div>
-                </nav>
             </div>
+        </div>
     </header>
 
     <!-- CUSTOMER DASHBOARD -->
     <main id="dashboard-customer">
-<!-- CONTACT SECTION -->
-        <section id="contact" class="content-section" style="background:#f9f9f9; padding: 60px 0;">
-            <div class="container" style="max-width: 800px; text-align: center;">
-                <h2 style="font-size: 2.5rem; margin-bottom: 24px; color: var(--text-dark);">Contact Us</h2>
-                <p style="font-size: 1.1rem; color: #666; margin-bottom: 40px;">
-                    Have questions? We'd love to hear from you. Reach out to our team!
-                </p>
-                
-                <div style="display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;">
-                    <div style="background: white; padding: 24px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); min-width: 200px;">
-                        <h3 style="font-size: 1.2rem; margin-bottom: 8px;">Email</h3>
-                        <p style="color: var(--primary); font-weight: 500;">hello@serenitybeauty.com</p>
+
+        <!-- CONTACT HERO -->
+        <section class="contact-hero">
+            <div class="contact-hero-overlay"></div>
+            <img src="images/contact-header.png" alt="Modern beauty salon storefront" class="contact-hero-bg">
+            <div class="container" style="position: relative; z-index: 2;">
+                <div class="contact-hero-content">
+                    <span class="about-badge" style="background: rgba(255,255,255,0.15); color: #fff; backdrop-filter: blur(8px);">Contact Us</span>
+                    <h1>We Would Love to Hear From You</h1>
+                    <p>Whether you have a question about our platform, need help with a booking, or want to partner with us, our team is here for you.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- CONTACT SPLIT LAYOUT -->
+        <section class="contact-main">
+            <div class="container">
+                <div class="contact-grid">
+                    <!-- Contact Info Cards -->
+                    <div class="contact-info-side">
+                        <div class="contact-card">
+                            <div class="contact-card-icon">
+                                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                            </div>
+                            <div class="contact-card-body">
+                                <h3>Phone</h3>
+                                <p>+964 750 123 4567</p>
+                                <span>Sunday - Thursday, 9am - 6pm</span>
+                            </div>
+                        </div>
+
+                        <div class="contact-card">
+                            <div class="contact-card-icon">
+                                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                            </div>
+                            <div class="contact-card-body">
+                                <h3>Email</h3>
+                                <p>hello@hewrina.com</p>
+                                <span>We reply within 24 hours</span>
+                            </div>
+                        </div>
+
+                        <div class="contact-card">
+                            <div class="contact-card-icon">
+                                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                            </div>
+                            <div class="contact-card-body">
+                                <h3>Address</h3>
+                                <p>Gulan Street, Erbil, Iraq</p>
+                                <span>Kurdistan Region</span>
+                            </div>
+                        </div>
+
+                        <div class="contact-card">
+                            <div class="contact-card-icon">
+                                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            </div>
+                            <div class="contact-card-body">
+                                <h3>Business Hours</h3>
+                                <p>Sun - Thu: 9:00 AM - 6:00 PM</p>
+                                <span>Fri - Sat: Closed</span>
+                            </div>
+                        </div>
                     </div>
-                    <div style="background: white; padding: 24px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); min-width: 200px;">
-                        <h3 style="font-size: 1.2rem; margin-bottom: 8px;">Phone</h3>
-                        <p style="color: var(--primary); font-weight: 500;">+964 750 123 4567</p>
+
+                    <!-- Contact Form -->
+                    <div class="contact-form-side">
+                        <div class="contact-form-wrapper">
+                            <h2>Get in Touch</h2>
+                            <p>Fill out the form below and we will get back to you as soon as possible.</p>
+                            <form id="contact-form" onsubmit="event.preventDefault(); handleContactSubmit();">
+                                <div class="form-group">
+                                    <label for="contact-name">Full Name</label>
+                                    <input type="text" id="contact-name" placeholder="Your name" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="contact-email">Email Address</label>
+                                    <input type="email" id="contact-email" placeholder="your@email.com" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="contact-subject">Subject</label>
+                                    <select id="contact-subject" required>
+                                        <option value="">Select a topic</option>
+                                        <option value="booking">Booking Help</option>
+                                        <option value="partnership">Partnership Inquiry</option>
+                                        <option value="feedback">Feedback</option>
+                                        <option value="other">Other</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="contact-message">Message</label>
+                                    <textarea id="contact-message" rows="5" placeholder="How can we help you?" required></textarea>
+                                </div>
+                                <button type="submit" class="btn-primary" style="width: 100%; padding: 14px;">Send Message</button>
+                            </form>
+                        </div>
                     </div>
                 </div>
             </div>
         </section>
 
-        
-</main>
+        <!-- FAQ SECTION -->
+        <section class="contact-faq">
+            <div class="container">
+                <div class="about-values-header">
+                    <span class="about-badge">FAQ</span>
+                    <h2>Frequently Asked Questions</h2>
+                </div>
+                <div class="faq-grid">
+                    <div class="faq-item">
+                        <h3>How do I book an appointment?</h3>
+                        <p>Simply browse our listed salons on the homepage, select a service, pick your preferred date and time, and confirm your booking. It takes less than a minute.</p>
+                    </div>
+                    <div class="faq-item">
+                        <h3>Can I cancel or reschedule?</h3>
+                        <p>Yes, you can manage your bookings from your profile. Cancellation policies may vary by salon, so please check before confirming.</p>
+                    </div>
+                    <div class="faq-item">
+                        <h3>How do I list my salon on Hewrina?</h3>
+                        <p>We would love to have you on board! Send us a partnership inquiry through the contact form above, and our team will guide you through the onboarding process.</p>
+                    </div>
+                    <div class="faq-item">
+                        <h3>Is the platform free for customers?</h3>
+                        <p>Absolutely. Browsing salons, booking appointments, and managing your visits is completely free for all customers.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>n>
 
     <!-- OWNER DASHBOARD -->
     <main id="dashboard-owner" style="display: none;">
@@ -290,7 +398,7 @@
 
                 <!-- Invoices from Admin -->
                 <div class="invoices-section" style="margin-top: 20px;">
-                    <h3> Invoices from DocBook</h3>
+                    <h3> Invoices from Hewrina</h3>
                     <div id="owner-invoices-list" class="invoices-list">
                         <div class="empty-state">No invoices yet.</div>
                     </div>
@@ -590,7 +698,7 @@
 
             <!-- HEADER -->
             <div id="auth-header" style="text-align: center; margin-bottom: 20px;">
-                <h2>Welcome to DocBook</h2>
+                <h2>Welcome to Hewrina</h2>
                 <p id="auth-subtitle" style="color: #666; font-size: 0.95rem;">Join the platform beauty lovers trust.
                 </p>
             </div>
@@ -938,7 +1046,7 @@
             <div id="invoice-content" class="invoice">
                 <div class="invoice-header">
                     <div class="invoice-logo">
-                        <h1> DocBook</h1>
+                        <h1> Hewrina</h1>
                         <p>Beauty & Wellness Platform</p>
                     </div>
                     <div class="invoice-title">
@@ -950,9 +1058,9 @@
                 <div class="invoice-meta">
                     <div class="invoice-from">
                         <strong>From:</strong>
-                        <p>DocBook Platform</p>
+                        <p>Hewrina Platform</p>
                         <p>Erbil, Kurdistan Region, Iraq</p>
-                        <p>info@docbook.iq</p>
+                        <p>hello@hewrina.com</p>
                     </div>
                     <div class="invoice-to">
                         <strong>Bill To:</strong>
@@ -1074,7 +1182,7 @@
 
     <footer>
         <div class="container">
-            <p>&copy; 2026 DocBook. All rights reserved.</p>
+            <p>&copy; 2026 Hewrina. All rights reserved.</p>
         </div>
     </footer>
 </body>

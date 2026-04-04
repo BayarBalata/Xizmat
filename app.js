@@ -135,9 +135,9 @@ async function init() {
     // Persistent Login
     onAuthStateChanged(auth, async (user) => {
         if (user) {
-            // Extract phone from dummy email (phone@docbook.app)
+            // Extract phone from dummy email (phone@hewrina.app)
             let phone = null;
-            if (user.email && user.email.includes('@docbook.app')) {
+            if (user.email && user.email.includes('@hewrina.app')) {
                 phone = user.email.split('@')[0];
             }
 
@@ -387,7 +387,7 @@ function setupEventListeners() {
                 }
 
                 // Login with their real email (if set) or fallback to default
-                const email = userDoc.email || phone + '@docbook.app';
+                const email = userDoc.email || phone + '@hewrina.app';
                 await signInWithEmailAndPassword(auth, email, password);
 
                 currentUser = userDoc;
@@ -433,7 +433,7 @@ function setupEventListeners() {
                 // OTP Success - Now create Real Account
                 await signOut(auth); // Sign out of the temporary phone session
 
-                const dummyEmail = tempAuthData.phone + '@docbook.app';
+                const dummyEmail = tempAuthData.phone + '@hewrina.app';
                 await createUserWithEmailAndPassword(auth, dummyEmail, tempAuthData.password);
 
                 // Create Firestore Doc
@@ -447,7 +447,7 @@ function setupEventListeners() {
                 await setDoc(doc(db, "users", tempAuthData.phone), newUser);
 
                 currentUser = newUser;
-                showToast(`Welcome to DocBook, ${newUser.name}!`, 'success');
+                showToast(`Welcome to Hewrina, ${newUser.name}!`, 'success');
 
                 localStorage.setItem('currentUser', JSON.stringify(currentUser));
                 updateUIForUser();
@@ -1038,22 +1038,30 @@ async function fetchBookedSlots(merchantId, dateStr) {
     }
 }
 
+function formatTime12h(time) {
+    const [h, m] = time.split(':').map(Number);
+    const period = h >= 12 ? 'PM' : 'AM';
+    const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    return `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
+}
+
 function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, workerCount) {
+    const display = formatTime12h(time);
     if (spotsLeft <= 0) {
         // Fully booked
         return `<div class="time-slot booked" title="All ${workerCount} workers booked">
-            <span style="text-decoration: line-through;">${time}</span>
+            <span style="text-decoration: line-through;">${display}</span>
             <span style="font-size:0.65rem; display:block; color:#ef4444;">Full</span>
         </div>`;
     } else if (bookedCount > 0) {
         // Partially booked — still available
         return `<div class="time-slot partial ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')" title="${spotsLeft} of ${workerCount} workers available">
-            <span>${time}</span>
+            <span>${display}</span>
             <span style="font-size:0.6rem; display:block; color:#d97706;">${spotsLeft} spot${spotsLeft > 1 ? 's' : ''} left</span>
         </div>`;
     } else {
         // Fully available
-        return `<div class="time-slot ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')">${time}</div>`;
+        return `<div class="time-slot ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')">${display}</div>`;
     }
 }
 
@@ -1270,7 +1278,7 @@ function renderBookingStep3() {
             </div>
             <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
                 <span style="color: #888; font-size: 0.95rem;">Time</span>
-                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${bookingState.time}</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${formatTime12h(bookingState.time)}</span>
             </div>
             
             <div style="height: 1px; background: #EBEBEB; margin: 20px 0;"></div>
@@ -1278,6 +1286,18 @@ function renderBookingStep3() {
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0;">
                 <span style="color: #888; font-size: 0.95rem;">Total</span>
                 <span style="color: #C19A6B; font-weight: 700; font-size: 1.2rem;">${totalCost.toLocaleString()} IQD</span>
+            </div>
+        </div>
+
+        <div style="background: #FFF8E1; border: 1px solid #FFE082; border-radius: 10px; padding: 14px 16px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#F9A825" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="min-width: 20px; margin-top: 1px;">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+            <div style="font-size: 0.82rem; color: #5D4037; line-height: 1.5;">
+                <strong style="display: block; margin-bottom: 2px; color: #E65100;">Health & Allergy Disclaimer</strong>
+                Upon arrival at the salon, please inform the staff of any allergies, skin sensitivities, or medical conditions you may have. Some treatments may involve products or procedures that could cause adverse reactions. Hewrina is not liable for any reactions resulting from undisclosed conditions.
             </div>
         </div>
     `;
@@ -4141,7 +4161,7 @@ if (profileSecurityForm) {
 
         try {
             // Re-authenticate user before changing password
-            const userEmail = currentUser.email || currentUser.phone + '@docbook.app';
+            const userEmail = currentUser.email || currentUser.phone + '@hewrina.app';
             const credential = EmailAuthProvider.credential(userEmail, currentPass);
             await reauthenticateWithCredential(auth.currentUser, credential);
             
