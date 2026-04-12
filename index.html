@@ -48,6 +48,11 @@
                             <span>My Profile</span>
                         </div>
 
+                        <!-- My Appointments -->
+                        <div class="dropdown-item" id="nav-my-appointments" style="display:none;" onclick="openMyAppointments()">
+                            <span>My Appointments</span>
+                        </div>
+
                         <!-- Logout -->
                         <div class="dropdown-item danger" onclick="handleLogout()">
                             <span>Logout</span>
@@ -100,10 +105,37 @@
                     <button class="btn-outline" style="background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.5); color: white; backdrop-filter: blur(4px);"
                         onclick="openServiceSearch()"> Find a Service</button>
                 </div>
-                <div class="search-bar serenity-search" style="max-width: 700px; padding: 12px; border-radius: 60px;">
-                    <input type="text" placeholder="Search for treatments (e.g. Facial, Massage)..."
-                        style="font-size: 1.1rem;">
-                    <button class="btn-primary" style="padding: 12px 30px;">Search</button>
+                <div class="enhanced-search-bar">
+                    <div class="search-field">
+                        <label>Treatment</label>
+                        <input type="text" id="search-treatment" placeholder="e.g. Haircut, Facial, Nails..." oninput="performSearch()">
+                    </div>
+                    <div class="search-divider"></div>
+                    <div class="search-field">
+                        <label>Category</label>
+                        <select id="search-category" onchange="performSearch()">
+                            <option value="all">All Categories</option>
+                            <option value="Hair Salon">Hair Salon</option>
+                            <option value="Nail Salon">Nail Salon</option>
+                            <option value="Barber Shop">Barber Shop</option>
+                            <option value="Aesthetics">Aesthetics</option>
+                            <option value="Skin Care">Skin Care</option>
+                            <option value="Laser Center">Laser Center</option>
+                            <option value="Makeup Studio">Makeup Studio</option>
+                            <option value="Brows & Lashes">Brows & Lashes</option>
+                        </select>
+                    </div>
+                    <div class="search-divider"></div>
+                    <div class="search-field">
+                        <label>Sort By</label>
+                        <select id="search-sort" onchange="performSearch()">
+                            <option value="default">Default</option>
+                            <option value="rating">Highest Rated</option>
+                            <option value="reviews">Most Reviews</option>
+                            <option value="nearest">Nearest</option>
+                        </select>
+                    </div>
+                    <button class="btn-search-enhanced" onclick="performSearch()">🔍</button>
                 </div>
             </div>
         </section>
@@ -126,9 +158,24 @@
                     </div>
                 </div>
 
-                <div id="merchants-grid" class="grid">
-                    <!-- Merchants loaded via JS -->
-                    <div class="loading-spinner">Loading...</div>
+                <div id="search-results-info" class="search-results-info" style="display: none;">
+                    <span class="results-count" id="search-results-count"></span>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <button class="map-toggle-btn" id="map-toggle-btn" onclick="toggleInlineMap()" style="display:none;">🗺️ Map</button>
+                        <button class="clear-search" onclick="clearSearch()">✕ Clear Search</button>
+                    </div>
+                </div>
+
+                <div class="discovery-layout" id="discovery-layout">
+                    <div class="discovery-list" id="discovery-list">
+                        <div id="merchants-grid" class="grid">
+                            <!-- Merchants loaded via JS -->
+                            <div class="loading-spinner">Loading...</div>
+                        </div>
+                    </div>
+                    <div class="discovery-map" id="discovery-map-panel" style="display:none;">
+                        <div id="discovery-map" style="width:100%; height:100%; border-radius: 12px;"></div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -147,6 +194,7 @@
             <div class="owner-tabs-container">
                 <button class="owner-tab active" data-tab="overview"> Overview</button>
                 <button class="owner-tab" data-tab="bookings">Bookings</button>
+                <button class="owner-tab" data-tab="orders">Orders</button>
                 <button class="owner-tab" data-tab="calendar">Calendar</button>
                 <button class="owner-tab" data-tab="store">My Store</button>
                 <button class="owner-tab" data-tab="financials"> Financials</button>
@@ -201,6 +249,38 @@
                             </tr>
                         </thead>
                         <tbody id="owner-bookings-tbody">
+                            <!-- Loaded via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ORDERS TAB -->
+            <div id="owner-orders" class="owner-panel" style="display: none;">
+                <div class="panel-header">
+                    <h2>Shop Orders</h2>
+                    <div class="filters">
+                        <button class="filter-btn active" onclick="filterOwnerOrders('all')">All</button>
+                        <button class="filter-btn" onclick="filterOwnerOrders('pending')">Pending</button>
+                        <button class="filter-btn" onclick="filterOwnerOrders('confirmed')">Confirmed</button>
+                        <button class="filter-btn" onclick="filterOwnerOrders('fulfilled')">Fulfilled</button>
+                        <button class="filter-btn" onclick="filterOwnerOrders('cancelled')">Cancelled</button>
+                    </div>
+                </div>
+                <div class="admin-table-container">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Order</th>
+                                <th>Customer</th>
+                                <th>Items</th>
+                                <th>Total</th>
+                                <th>Placed</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="owner-orders-tbody">
                             <!-- Loaded via JS -->
                         </tbody>
                     </table>
@@ -268,6 +348,11 @@
                             <small style="color: #666; margin-top: 4px; display: block;">How many staff can serve customers at the same time</small>
                         </div>
                         <div class="form-group">
+                            <label>Cancellation & No-Show Policy</label>
+                            <textarea id="owner-cancellation-policy" rows="3" placeholder="e.g. Cancellations within 24 hours will be charged 50% of the service fee."></textarea>
+                            <small style="color: #666; margin-top: 4px; display: block;">Customers must agree to this policy before booking.</small>
+                        </div>
+                        <div class="form-group">
                             <label>Store Photo</label>
                             <div class="photo-upload-container">
                                 <img id="owner-store-photo-preview" src="" alt="Store Preview"
@@ -301,6 +386,26 @@
                         </div>
                         <button type="button" class="btn-add-service" onclick="openAddServiceModalForOwner()">
                              Add New Service
+                        </button>
+
+                        <!-- Staff Section for Owner -->
+                        <div class="section-divider"></div>
+                        <h3> Staff Members</h3>
+                        <div id="owner-staff-list" class="sortable-list">
+                            <!-- Populated via JS -->
+                        </div>
+                        <button type="button" class="btn-add-service" onclick="openAddStaffModalForOwner()" style="background:#e0f2fe; color:#0369a1; border-color:#bae6fd;">
+                             Add New Staff Member
+                        </button>
+
+                        <!-- Products Section for Owner -->
+                        <div class="section-divider"></div>
+                        <h3> Products</h3>
+                        <div id="owner-products-list" class="sortable-list">
+                            <!-- Populated via JS -->
+                        </div>
+                        <button type="button" class="btn-add-service" onclick="openAddProductModalForOwner()" style="background:#f0fdf4; color:#166534; border-color:#bbf7d0;">
+                             Add New Product
                         </button>
                     </form>
                 </div>
@@ -360,6 +465,7 @@
                 <button class="admin-tab active" data-tab="stores"> Stores</button>
                 <button class="admin-tab" data-tab="offers"> Offers</button>
                 <button class="admin-tab" data-tab="sponsors"> Sponsors</button>
+                <button class="admin-tab" data-tab="orders"> Orders</button>
                 <button class="admin-tab" data-tab="financials"> Financials</button>
                 <button class="admin-tab" data-tab="users"> Users</button>
             </div>
@@ -435,6 +541,7 @@
                                 <th>Store</th>
                                 <th>Service</th>
                                 <th>Discount</th>
+                                <th>Valid Hours</th>
                                 <th>Duration</th>
                                 <th>Status</th>
                                 <th>Actions</th>
@@ -470,6 +577,39 @@
                     <div id="external-ads-list" class="sponsored-items-grid">
                         <!-- Loaded via JS -->
                     </div>
+                </div>
+            </div>
+
+            <!-- ORDERS TAB -->
+            <div id="admin-orders" class="admin-panel" style="display: none;">
+                <div class="panel-header">
+                    <h2>Shop Orders Oversight</h2>
+                    <div class="filters">
+                        <button class="filter-btn active" onclick="filterAdminOrders('all')">All</button>
+                        <button class="filter-btn" onclick="filterAdminOrders('pending')">Pending</button>
+                        <button class="filter-btn" onclick="filterAdminOrders('confirmed')">Confirmed</button>
+                        <button class="filter-btn" onclick="filterAdminOrders('fulfilled')">Fulfilled</button>
+                        <button class="filter-btn" onclick="filterAdminOrders('cancelled')">Cancelled</button>
+                    </div>
+                </div>
+                <div class="admin-table-container">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Order</th>
+                                <th>Store</th>
+                                <th>Customer</th>
+                                <th>Items</th>
+                                <th>Total</th>
+                                <th>Placed</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="admin-orders-tbody">
+                            <!-- Loaded via JS -->
+                        </tbody>
+                    </table>
                 </div>
             </div>
 
@@ -785,6 +925,10 @@
                     <label>Address</label>
                     <input type="text" id="store-address" required placeholder="e.g. Ankawa, Erbil">
                 </div>
+                <div class="form-group">
+                    <label>Cancellation & No-Show Policy</label>
+                    <textarea id="store-cancellation-policy" rows="3" placeholder="e.g. Cancellations within 24 hours will be charged 50% of the service fee."></textarea>
+                </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label>Latitude</label>
@@ -891,6 +1035,19 @@
                         <input type="number" id="offer-duration" min="1" max="365" required placeholder="e.g. 7">
                     </div>
                 </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Valid From (optional)</label>
+                        <input type="time" id="offer-start-time">
+                    </div>
+                    <div class="form-group">
+                        <label>Valid Until (optional)</label>
+                        <input type="time" id="offer-end-time">
+                    </div>
+                </div>
+                <p class="hint" style="font-size: 0.8rem; color: #666; margin-top: -4px; margin-bottom: 10px;">
+                    Leave both time fields empty for all-day offers.
+                </p>
                 <button type="submit" class="btn-primary full-width">Create Offer</button>
             </form>
         </div>
@@ -951,6 +1108,10 @@
                     <label>Service Name</label>
                     <input type="text" id="service-edit-name" required placeholder="e.g. Haircut">
                 </div>
+                <div class="form-group">
+                    <label>Category</label>
+                    <input type="text" id="service-edit-category" placeholder="e.g. Hair, Nails, Massage">
+                </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label>Price (IQD)</label>
@@ -962,6 +1123,60 @@
                     </div>
                 </div>
                 <button type="submit" class="btn-primary full-width">Save Service</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- STAFF MODAL (Edit/Add Staff) -->
+    <div id="staff-modal" class="modal">
+        <div class="modal-content admin-modal" style="max-width: 400px;">
+            <span class="close-modal" onclick="closeModal('staff-modal')">&times;</span>
+            <h2 id="staff-modal-title">Add Staff Member</h2>
+            <form id="staff-form">
+                <input type="hidden" id="staff-edit-index">
+                <div class="form-group">
+                    <label>Staff Name</label>
+                    <input type="text" id="staff-edit-name" required placeholder="e.g. Sarah">
+                </div>
+                <div class="form-group">
+                    <label>Role / Title</label>
+                    <input type="text" id="staff-edit-role" placeholder="e.g. Senior Stylist, Barber">
+                </div>
+                <div class="form-group">
+                    <label>Profile Image URL (Optional)</label>
+                    <input type="url" id="staff-edit-image" placeholder="https://...">
+                </div>
+                <button type="submit" class="btn-primary full-width">Save Staff</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- PRODUCT MODAL (Edit/Add Product) -->
+    <div id="product-modal" class="modal">
+        <div class="modal-content admin-modal" style="max-width: 420px;">
+            <span class="close-modal" onclick="closeModal('product-modal')">&times;</span>
+            <h2 id="product-modal-title">Add Product</h2>
+            <form id="product-form">
+                <input type="hidden" id="product-edit-index">
+                <div class="form-group">
+                    <label>Product Name</label>
+                    <input type="text" id="product-edit-name" required placeholder="e.g. Hair Serum">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Price (IQD)</label>
+                        <input type="number" id="product-edit-price" required min="0" step="500" placeholder="e.g. 25000">
+                    </div>
+                    <div class="form-group">
+                        <label>Stock</label>
+                        <input type="number" id="product-edit-stock" required min="0" step="1" placeholder="e.g. 15">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Image URL (Optional)</label>
+                    <input type="url" id="product-edit-image" placeholder="https://...">
+                </div>
+                <button type="submit" class="btn-primary full-width">Save Product</button>
             </form>
         </div>
     </div>
@@ -1117,6 +1332,56 @@
             </div>
         </div>
     </div>
+
+    <!-- REVIEW MODAL -->
+    <div id="review-modal" class="modal">
+        <div class="modal-content review-modal-content">
+            <span class="close" onclick="closeModal('review-modal')">&times;</span>
+            <h2>Rate Your Experience</h2>
+            <p class="review-subtitle" id="review-store-name">How was your visit?</p>
+            
+            <div class="star-picker" id="star-picker">
+                <span class="star" data-value="1" onclick="setReviewRating(1)">★</span>
+                <span class="star" data-value="2" onclick="setReviewRating(2)">★</span>
+                <span class="star" data-value="3" onclick="setReviewRating(3)">★</span>
+                <span class="star" data-value="4" onclick="setReviewRating(4)">★</span>
+                <span class="star" data-value="5" onclick="setReviewRating(5)">★</span>
+            </div>
+            <span class="review-rating-label" id="rating-label">Tap a star to rate</span>
+            
+            <textarea class="review-textarea" id="review-comment" placeholder="Tell us about your experience (optional)..."></textarea>
+            
+            <button class="btn-primary full-width" onclick="submitReview()" id="btn-submit-review">Submit Review</button>
+        </div>
+    </div>
+
+    <!-- VENUE PROFILE VIEW (inline, replaces homepage) -->
+    <main id="venue-profile-view" style="display: none;">
+        <div class="venue-profile-container" id="venue-profile-content">
+            <!-- Rendered dynamically by JS -->
+        </div>
+    </main>
+
+    <!-- CUSTOMER APPOINTMENTS VIEW -->
+    <main id="customer-appointments-view" style="display: none; padding-top: 40px; padding-bottom: 60px; min-height: 80vh;">
+        <div class="container" style="max-width: 800px; margin: 0 auto;">
+            <button class="venue-back-btn" onclick="closeMyAppointments()" style="margin-bottom: 20px;">← Back to Home</button>
+            <h1 style="font-size: 2rem; margin-bottom: 20px;">My Appointments</h1>
+            
+            <div class="owner-tabs-container" style="margin-bottom: 30px;">
+                <button class="owner-tab active" id="tab-upcoming" onclick="switchAppointmentTab('upcoming')">Upcoming</button>
+                <button class="owner-tab" id="tab-past" onclick="switchAppointmentTab('past')">Past</button>
+            </div>
+
+            <div id="appointments-list-upcoming" class="appointments-list">
+                <!-- Javascript will render upcoming bookings -->
+            </div>
+            
+            <div id="appointments-list-past" class="appointments-list" style="display:none;">
+                <!-- Javascript will render past bookings -->
+            </div>
+        </div>
+    </main>
 
     <!-- Toast Container -->
     <div id="toast-container"></div>

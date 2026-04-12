@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hewrina Platform - Product Presentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;800&family=Sora:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #101820;
+      --surface: #fafaf9;
+      --accent: #c19a6b;
+      --ink: #0f172a;
+      --muted: #475569;
+      --line: #e5e7eb;
+      --ok: #166534;
+      --bg: #f4f4f2;
+    }
+
+    @page {
+      size: A4;
+      margin: 0;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "DM Sans", "Segoe UI", sans-serif;
+    }
+
+    .slide {
+      width: 210mm;
+      min-height: 297mm;
+      padding: 18mm 16mm;
+      margin: 0 auto;
+      background: var(--surface);
+      page-break-after: always;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .slide:last-child {
+      page-break-after: auto;
+    }
+
+    .cover {
+      color: #fff;
+      background:
+        radial-gradient(1200px 480px at -10% -20%, rgba(193, 154, 107, 0.38), transparent 60%),
+        radial-gradient(850px 460px at 120% 10%, rgba(255, 255, 255, 0.12), transparent 62%),
+        linear-gradient(135deg, #0f172a 0%, #101820 48%, #202a37 100%);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .brand-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 13px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      width: fit-content;
+    }
+
+    .brand-pill .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      font-family: "Sora", "DM Sans", sans-serif;
+      line-height: 1.15;
+    }
+
+    .cover h1 {
+      font-size: 44px;
+      max-width: 82%;
+      margin-top: 18mm;
+      margin-bottom: 12px;
+      letter-spacing: -0.02em;
+    }
+
+    .cover .subtitle {
+      margin-top: 6px;
+      font-size: 18px;
+      line-height: 1.5;
+      color: rgba(255, 255, 255, 0.85);
+      max-width: 78%;
+    }
+
+    .cover-meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .meta-card {
+      background: rgba(255, 255, 255, 0.11);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 14px;
+      padding: 12px;
+    }
+
+    .meta-card .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: rgba(255, 255, 255, 0.72);
+    }
+
+    .meta-card .value {
+      margin-top: 6px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .title-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .title-row h2 {
+      font-size: 28px;
+      letter-spacing: -0.02em;
+      color: var(--primary);
+    }
+
+    .title-row .page-kicker {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #7c818a;
+    }
+
+    .lead {
+      margin: 2px 0 14px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .card h3 {
+      font-size: 13px;
+      color: var(--primary);
+      margin-bottom: 8px;
+    }
+
+    .list {
+      margin: 0;
+      padding-left: 18px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 10px;
+      align-items: start;
+      margin-top: 10px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    figure {
+      margin: 0;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .shot {
+      width: 100%;
+      display: block;
+      background: #f1f5f9;
+    }
+
+    figcaption {
+      padding: 8px 10px;
+      font-size: 11px;
+      color: #64748b;
+      border-top: 1px solid var(--line);
+      background: #fcfcfc;
+    }
+
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .kpi {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      padding: 12px;
+    }
+
+    .kpi .name {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #6b7280;
+    }
+
+    .kpi .num {
+      margin-top: 6px;
+      font-family: "Sora", sans-serif;
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--primary);
+      letter-spacing: -0.02em;
+    }
+
+    .kpi .meta {
+      margin-top: 4px;
+      font-size: 11px;
+      color: #64748b;
+    }
+
+    .section-tag {
+      display: inline-block;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: #fff;
+      background: var(--ok);
+      padding: 4px 8px;
+      border-radius: 999px;
+      margin-bottom: 8px;
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .table th,
+    .table td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .table th {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #334155;
+      background: #f8fafc;
+    }
+
+    .table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .status {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      background: #ecfdf3;
+      color: var(--ok);
+      border: 1px solid #bbf7d0;
+    }
+
+    .timeline {
+      margin-top: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 100px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .timeline-item .when {
+      font-weight: 700;
+      color: var(--primary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .footer-note {
+      position: absolute;
+      bottom: 9mm;
+      left: 16mm;
+      right: 16mm;
+      font-size: 10px;
+      color: #7c818a;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .thumb-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .thumb-grid img {
+      width: 100%;
+      height: 55mm;
+      object-fit: cover;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      display: block;
+      background: #fff;
+    }
+
+    .small {
+      font-size: 11px;
+      color: #64748b;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <section class="slide cover">
+    <div>
+      <span class="brand-pill"><span class="dot"></span> Hewrina Product Portfolio</span>
+      <h1>Complete Website Guide and Feature Walkthrough</h1>
+      <p class="subtitle">Production-ready presentation for business stakeholders covering customer journey, owner operations, admin controls, and commerce capabilities.</p>
+    </div>
+    <div class="cover-meta">
+      <div class="meta-card">
+        <div class="label">Platform</div>
+        <div class="value">Hewrina</div>
+      </div>
+      <div class="meta-card">
+        <div class="label">Document Type</div>
+        <div class="value">Business Guide Deck</div>
+      </div>
+      <div class="meta-card">
+        <div class="label">Release Date</div>
+        <div class="value">April 12, 2026</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Executive Overview</h2>
+      <span class="page-kicker">Snapshot</span>
+    </div>
+    <p class="lead">Hewrina is a booking and discovery marketplace for beauty and wellness venues. The platform combines appointment scheduling, venue discovery, service-level promotions, and integrated product commerce in one customer and operator experience.</p>
+
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="name">Primary Personas</div>
+        <div class="num">3</div>
+        <div class="meta">Customer, Owner, Admin</div>
+      </div>
+      <div class="kpi">
+        <div class="name">Core Flows</div>
+        <div class="num">6</div>
+        <div class="meta">Search, Booking, Shop, Orders, Offers, Ops</div>
+      </div>
+      <div class="kpi">
+        <div class="name">UI Surfaces</div>
+        <div class="num">9+</div>
+        <div class="meta">Landing, Profile, Dashboards, Modals</div>
+      </div>
+      <div class="kpi">
+        <div class="name">Monetization</div>
+        <div class="num">2x</div>
+        <div class="meta">Service bookings and product sales</div>
+      </div>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <h3>Customer Value</h3>
+        <ul class="list">
+          <li>Discover venues by service, category, and map context.</li>
+          <li>Book multi-step appointments with staff, date, and time selection.</li>
+          <li>Buy physical products in the same venue profile.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Owner Value</h3>
+        <ul class="list">
+          <li>Manage services, staff, products, and store profile.</li>
+          <li>Operate both bookings and shop orders from one dashboard.</li>
+          <li>Use promotional offers to increase off-peak utilization.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Admin Value</h3>
+        <ul class="list">
+          <li>Moderate stores, offers, and sponsorship inventory.</li>
+          <li>Oversee all e-commerce orders and lifecycle status.</li>
+          <li>Track platform-level commercial and operational health.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-note"><span>Hewrina | Business Owner Review</span><span>Page 2</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Customer Discovery Experience</h2>
+      <span class="page-kicker">Front Stage</span>
+    </div>
+    <p class="lead">The entry journey centers on search and discovery. Users can immediately browse venues, apply filters, and move into profile-level booking or shopping without leaving the primary product surface.</p>
+
+    <div class="grid-2">
+      <figure>
+        <img class="shot" src="screenshots/04-discovery-dashboard.png" alt="Discovery dashboard" />
+        <figcaption>Search filters, featured venues, and discovery list.</figcaption>
+      </figure>
+      <div class="stack">
+        <figure>
+          <img class="shot" src="screenshots/01-home.png" alt="Home landing" />
+          <figcaption>Brand-forward landing and hero section.</figcaption>
+        </figure>
+        <figure>
+          <img class="shot" src="screenshots/16-mobile-home.png" alt="Mobile responsive home" />
+          <figcaption>Mobile rendering confirms responsive behavior.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Customer Action</th>
+          <th>System Response</th>
+          <th>Business Impact</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Search by treatment/category</td>
+          <td>Instantly filtered venue inventory</td>
+          <td>Faster conversion to booking intent</td>
+        </tr>
+        <tr>
+          <td>Browse venue cards</td>
+          <td>Ratings, distance, and offer cues visible</td>
+          <td>Higher confidence and click-through</td>
+        </tr>
+        <tr>
+          <td>Switch to mobile</td>
+          <td>Layout adapts for small screens</td>
+          <td>Usable across phone-first audience</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="footer-note"><span>Hewrina | Customer Experience</span><span>Page 3</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Venue Profile: Services + Shop</h2>
+      <span class="page-kicker">Task 6</span>
+    </div>
+    <span class="section-tag">Implemented</span>
+    <p class="lead">Each venue now combines service booking and product commerce inside one profile. Tabs separate Services, Shop, and Reviews, while cart and stock awareness drive the commerce flow.</p>
+
+    <div class="grid-2">
+      <figure>
+        <img class="shot" src="screenshots/05-venue-services.png" alt="Venue services tab" />
+        <figcaption>Services tab with offer visibility and direct booking actions.</figcaption>
+      </figure>
+      <div class="stack">
+        <figure>
+          <img class="shot" src="screenshots/06-venue-shop.png" alt="Venue shop tab" />
+          <figcaption>Shop tab with product cards, stock state, and add-to-cart.</figcaption>
+        </figure>
+        <figure>
+          <img class="shot" src="screenshots/07-venue-cart.png" alt="Venue cart state" />
+          <figcaption>Cart summary embedded in profile, ready for checkout.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <div class="cards" style="margin-top: 10px;">
+      <div class="card">
+        <h3>Product Management</h3>
+        <ul class="list">
+          <li>Owner adds name, price, image, and stock quantity.</li>
+          <li>Out-of-stock products auto-disable purchase action.</li>
+          <li>Stock counts appear at point of purchase.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Cart + Checkout</h3>
+        <ul class="list">
+          <li>Quantity controls with max stock enforcement.</li>
+          <li>Checkout writes `orders` collection records.</li>
+          <li>Stock decremented after order placement.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Revenue Expansion</h3>
+        <ul class="list">
+          <li>Adds non-service revenue stream for venues.</li>
+          <li>Raises per-customer basket value.</li>
+          <li>Improves repeat purchase potential.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-note"><span>Hewrina | Commerce Extension</span><span>Page 4</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Booking Flow and Smart Deals</h2>
+      <span class="page-kicker">Task 5</span>
+    </div>
+    <span class="section-tag">Implemented</span>
+    <p class="lead">The booking wizard now supports time-window-based promotions. Off-peak deal logic is surfaced during slot selection and correctly applied to totals at confirmation and booking submission.</p>
+
+    <div class="grid-2">
+      <figure>
+        <img class="shot" src="screenshots/08-booking-step1.png" alt="Booking wizard" />
+        <figcaption>Step-by-step booking wizard: service, staff, date/time, confirmation.</figcaption>
+      </figure>
+      <figure>
+        <img class="shot" src="screenshots/09-booking-time-slots.png" alt="Booking time slots" />
+        <figcaption>Time-slot selection with discount indicators for eligible windows.</figcaption>
+      </figure>
+    </div>
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Capability</th>
+          <th>Behavior</th>
+          <th>Business Outcome</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Offer valid hours</td>
+          <td>Owner/Admin can set start-end time window per offer</td>
+          <td>Supports controlled off-peak promotions</td>
+        </tr>
+        <tr>
+          <td>Slot-level highlighting</td>
+          <td>Eligible times show discount cue in calendar/time list</td>
+          <td>Guides customer to underutilized hours</td>
+        </tr>
+        <tr>
+          <td>Final total integrity</td>
+          <td>Discount is recalculated from selected slot before submit</td>
+          <td>Prevents mismatch between UI and stored booking price</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="footer-note"><span>Hewrina | Smart Pricing</span><span>Page 5</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Owner Operations Dashboard</h2>
+      <span class="page-kicker">Owner View</span>
+    </div>
+    <p class="lead">Owners now operate service delivery and commerce from a single dashboard surface, including store configuration, product inventory, and order lifecycle controls.</p>
+
+    <div class="grid-2">
+      <div class="stack">
+        <figure>
+          <img class="shot" src="screenshots/10-owner-overview.png" alt="Owner overview" />
+          <figcaption>Owner overview with booking and performance cards.</figcaption>
+        </figure>
+        <figure>
+          <img class="shot" src="screenshots/11-owner-store.png" alt="Owner store tab" />
+          <figcaption>My Store tab including services, staff, and product CRUD.</figcaption>
+        </figure>
+      </div>
+      <figure>
+        <img class="shot" src="screenshots/12-owner-orders.png" alt="Owner orders tab" />
+        <figcaption>Shop Orders tab with filtering and status actions.</figcaption>
+      </figure>
+    </div>
+
+    <div class="cards" style="margin-top: 10px;">
+      <div class="card">
+        <h3>Order Lifecycle Controls</h3>
+        <ul class="list">
+          <li>Status updates: pending, confirmed, fulfilled, cancelled.</li>
+          <li>Filters for faster triage and service-level discipline.</li>
+          <li>Cancellation restocks inventory automatically.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Operational Benefits</h3>
+        <ul class="list">
+          <li>Single source for appointments and retail operations.</li>
+          <li>Reduced manual coordination across systems.</li>
+          <li>Cleaner handoff to staff and front-desk teams.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Data Governance</h3>
+        <ul class="list">
+          <li>Owner-scoped order visibility by store association.</li>
+          <li>Consistent state transitions across owner/admin actions.</li>
+          <li>UI refreshes immediately after status changes.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-note"><span>Hewrina | Merchant Operations</span><span>Page 6</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Admin Governance and Oversight</h2>
+      <span class="page-kicker">Admin View</span>
+    </div>
+    <p class="lead">Admin surfaces support marketplace governance, promotional control, and platform-wide commerce visibility with standardized controls.</p>
+
+    <div class="grid-2">
+      <figure>
+        <img class="shot" src="screenshots/13-admin-stores.png" alt="Admin stores" />
+        <figcaption>Store management and marketplace moderation surface.</figcaption>
+      </figure>
+      <div class="stack">
+        <figure>
+          <img class="shot" src="screenshots/14-admin-offers.png" alt="Admin offers" />
+          <figcaption>Offers table with valid-hour visibility and control.</figcaption>
+        </figure>
+        <figure>
+          <img class="shot" src="screenshots/15-admin-orders.png" alt="Admin orders" />
+          <figcaption>Platform-wide orders oversight with status workflow.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Admin Module</th>
+          <th>What It Controls</th>
+          <th>Why It Matters</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Stores</td>
+          <td>Creation, activation, and catalog governance</td>
+          <td>Maintains marketplace quality baseline</td>
+        </tr>
+        <tr>
+          <td>Offers</td>
+          <td>Discount logic and valid-hour boundaries</td>
+          <td>Prevents uncontrolled promotions</td>
+        </tr>
+        <tr>
+          <td>Orders</td>
+          <td>Cross-store fulfillment and exception handling</td>
+          <td>Ensures service continuity and trust</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="footer-note"><span>Hewrina | Platform Governance</span><span>Page 7</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Feature Completion Matrix</h2>
+      <span class="page-kicker">Delivery Status</span>
+    </div>
+    <p class="lead">The following matrix summarizes the currently delivered product capabilities relevant to booking, commerce, and operational management.</p>
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Feature Group</th>
+          <th>Delivered Capability</th>
+          <th>Status</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Discovery</td>
+          <td>Search filters, venue cards, profile entry flow</td>
+          <td><span class="status">Live</span></td>
+          <td>Desktop and mobile validated.</td>
+        </tr>
+        <tr>
+          <td>Booking Wizard</td>
+          <td>Service, staff, date/time, confirmation steps</td>
+          <td><span class="status">Live</span></td>
+          <td>Integrated with offers and final price calculation.</td>
+        </tr>
+        <tr>
+          <td>Smart Deals</td>
+          <td>Time-window offers, slot highlights, slot-aware total</td>
+          <td><span class="status">Live</span></td>
+          <td>Supports off-peak conversion strategy.</td>
+        </tr>
+        <tr>
+          <td>Venue Shop</td>
+          <td>Product catalog, cart, checkout, stock decrement</td>
+          <td><span class="status">Live</span></td>
+          <td>Adds retail revenue path.</td>
+        </tr>
+        <tr>
+          <td>Owner Orders</td>
+          <td>Status actions + filtering + restock on cancellation</td>
+          <td><span class="status">Live</span></td>
+          <td>Store-scoped operational control.</td>
+        </tr>
+        <tr>
+          <td>Admin Orders</td>
+          <td>Platform-level order monitoring and status actions</td>
+          <td><span class="status">Live</span></td>
+          <td>Centralized governance and escalation support.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="timeline">
+      <div class="timeline-item"><div class="when">Current</div><div>Core business flows are complete and demo-ready for stakeholder validation.</div></div>
+      <div class="timeline-item"><div class="when">Next</div><div>Run production hardening: edge-case tests, monitoring, and release checklist finalization.</div></div>
+      <div class="timeline-item"><div class="when">Scale</div><div>Expand analytics dashboards and add conversion instrumentation for offer performance.</div></div>
+    </div>
+
+    <div class="footer-note"><span>Hewrina | Delivery Dashboard</span><span>Page 8</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Technical Readout</h2>
+      <span class="page-kicker">Implementation</span>
+    </div>
+    <p class="lead">Architecture remains intentionally lean for velocity: single-page frontend with Firebase-backed auth and persistence, supporting role-aware rendering and transactional updates.</p>
+
+    <div class="cards" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+      <div class="card">
+        <h3>Application Stack</h3>
+        <ul class="list">
+          <li>Frontend: HTML5, CSS3, Vanilla JavaScript</li>
+          <li>Data: Firestore collections for users, stores, bookings, orders, offers</li>
+          <li>Auth: Firebase Authentication with role-based UI switching</li>
+          <li>Storage: Firebase Storage for media assets</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Transaction Integrity</h3>
+        <ul class="list">
+          <li>Checkout writes order records and decrements product stock.</li>
+          <li>Order cancellation triggers stock restock logic.</li>
+          <li>Booking total recalculates against selected slot + valid-hour offer.</li>
+          <li>Owner/Admin status updates refresh tables after mutation.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="cards" style="margin-top: 10px; grid-template-columns: repeat(3, minmax(0, 1fr));">
+      <div class="card">
+        <h3>Customer Layer</h3>
+        <p class="small">Discovery and profile flows optimized for quick conversion from search to booking or cart checkout.</p>
+      </div>
+      <div class="card">
+        <h3>Owner Layer</h3>
+        <p class="small">Unified operations across appointments, products, and order fulfillment statuses.</p>
+      </div>
+      <div class="card">
+        <h3>Admin Layer</h3>
+        <p class="small">Marketplace governance for catalog quality, promotions, and order-level intervention.</p>
+      </div>
+    </div>
+
+    <div class="footer-note"><span>Hewrina | System Perspective</span><span>Page 9</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Production Readiness Checklist</h2>
+      <span class="page-kicker">Go-Live</span>
+    </div>
+    <p class="lead">The product is presentation-ready and functionally complete for the delivered scope. The checklist below frames final hardening before full production launch.</p>
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Area</th>
+          <th>Recommendation</th>
+          <th>Priority</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Security Rules</td>
+          <td>Validate Firestore role constraints for order and offer writes.</td>
+          <td>High</td>
+        </tr>
+        <tr>
+          <td>Data Validation</td>
+          <td>Add strict numeric guards for prices, stock, and discount ranges.</td>
+          <td>High</td>
+        </tr>
+        <tr>
+          <td>Observability</td>
+          <td>Track booking conversion, cart conversion, and order lifecycle latency.</td>
+          <td>Medium</td>
+        </tr>
+        <tr>
+          <td>Quality Assurance</td>
+          <td>Run regression matrix for customer/owner/admin paths across devices.</td>
+          <td>Medium</td>
+        </tr>
+        <tr>
+          <td>Business Reporting</td>
+          <td>Expose owner-level sales and offer utilization dashboards.</td>
+          <td>Medium</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="cards" style="grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 12px;">
+      <div class="card">
+        <h3>Current Outcome</h3>
+        <p class="small">Hewrina now supports end-to-end marketplace operations with both service bookings and product commerce, including role-aware dashboards and governance controls.</p>
+      </div>
+      <div class="card">
+        <h3>Business Narrative</h3>
+        <p class="small">The platform is positioned as a premium booking and retail ecosystem where venues can grow utilization and average order value through integrated operations.</p>
+      </div>
+    </div>
+
+    <div class="footer-note"><span>Hewrina | Readiness Plan</span><span>Page 10</span></div>
+  </section>
+
+  <section class="slide">
+    <div class="title-row">
+      <h2>Visual Appendix</h2>
+      <span class="page-kicker">Screenshot Library</span>
+    </div>
+    <p class="lead">Reference captures used in this guide, sourced directly from the running environment on `localhost:3000`.</p>
+
+    <div class="thumb-grid">
+      <img src="screenshots/04-discovery-dashboard.png" alt="Discovery" />
+      <img src="screenshots/05-venue-services.png" alt="Services" />
+      <img src="screenshots/06-venue-shop.png" alt="Shop" />
+      <img src="screenshots/07-venue-cart.png" alt="Cart" />
+      <img src="screenshots/09-booking-time-slots.png" alt="Booking times" />
+      <img src="screenshots/10-owner-overview.png" alt="Owner overview" />
+      <img src="screenshots/11-owner-store.png" alt="Owner store" />
+      <img src="screenshots/14-admin-offers.png" alt="Admin offers" />
+      <img src="screenshots/16-mobile-home.png" alt="Mobile home" />
+    </div>
+
+    <div class="footer-note"><span>Hewrina | End of Deck</span><span>Page 11</span></div>
+  </section>
+</body>
+</html>

@@ -1,5 +1,5 @@
 import { db, auth, storage } from "./firebase-config.js";
-import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy, limit, runTransaction } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { RecaptchaVerifier, signInWithPhoneNumber, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, EmailAuthProvider, reauthenticateWithCredential, updateEmail, updatePassword, updateProfile } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
@@ -18,6 +18,7 @@ const sponsorCarousel = document.getElementById('sponsor-carousel');
 let allMerchants = [];
 let allOffers = [];
 let allSponsors = [];
+let allReviews = [];
 let currentFilter = 'all';
 let currentUser = null;
 let map = null;
@@ -129,6 +130,7 @@ window.showConfirm = function (message) {
 async function init() {
     setupEventListeners();
     await loadOffersData(); // Load offers first so discounts show on cards
+    await loadReviewsData(); // Load reviews for star ratings on cards
     await loadMerchants();
     loadSponsorsForCustomer();
 
@@ -171,6 +173,203 @@ async function loadOffersData() {
         });
     } catch (error) {
         console.error('Error loading offers:', error);
+    }
+}
+
+function toSafeDate(value) {
+    if (!value) return null;
+    const dateValue = value?.toDate ? value.toDate() : new Date(value);
+    return isNaN(dateValue.getTime()) ? null : dateValue;
+}
+
+function normalizeOfferInputTime(timeValue) {
+    if (!timeValue || typeof timeValue !== 'string') return null;
+    const parts = timeValue.split(':');
+    if (parts.length < 2) return null;
+    const hour = Number(parts[0]);
+    const minute = Number(parts[1]);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return null;
+    }
+    return `${hour}:${String(minute).padStart(2, '0')}`;
+}
+
+function parseTimeToMinutes(timeValue) {
+    const normalized = normalizeOfferInputTime(timeValue);
+    if (!normalized) return null;
+    const [h, m] = normalized.split(':').map(Number);
+    return (h * 60) + m;
+}
+
+function isOfferTimeRestricted(offer) {
+    return parseTimeToMinutes(offer?.validFromTime) !== null && parseTimeToMinutes(offer?.validToTime) !== null;
+}
+
+function formatOfferHours(offer) {
+    if (!isOfferTimeRestricted(offer)) return 'All day';
+    const from = normalizeOfferInputTime(offer.validFromTime);
+    const to = normalizeOfferInputTime(offer.validToTime);
+    if (!from || !to) return 'All day';
+    return `${formatTime12h(from)} - ${formatTime12h(to)}`;
+}
+
+function getBookingDateTime(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return null;
+    const selectedDate = new Date(dateStr);
+    if (isNaN(selectedDate.getTime())) return null;
+    const normalizedTime = normalizeOfferInputTime(timeStr);
+    if (!normalizedTime) return null;
+    const [hours, minutes] = normalizedTime.split(':').map(Number);
+    return new Date(
+        selectedDate.getFullYear(),
+        selectedDate.getMonth(),
+        selectedDate.getDate(),
+        hours,
+        minutes
+    );
+}
+
+function isOfferActiveAt(offer, atDate = new Date()) {
+    if (!offer || !offer.active) return false;
+    const startDate = toSafeDate(offer.startDate);
+    const endDate = toSafeDate(offer.endDate);
+    const checkDate = atDate instanceof Date && !isNaN(atDate.getTime()) ? atDate : new Date();
+    if (startDate && startDate > checkDate) return false;
+    if (endDate && endDate < checkDate) return false;
+    return true;
+}
+
+function isTimeWithinOfferWindow(offer, timeStr) {
+    if (!isOfferTimeRestricted(offer)) return true;
+    const timeMinutes = parseTimeToMinutes(timeStr);
+    const startMinutes = parseTimeToMinutes(offer.validFromTime);
+    const endMinutes = parseTimeToMinutes(offer.validToTime);
+    if (timeMinutes === null || startMinutes === null || endMinutes === null) return false;
+
+    // Handles both same-day windows (10:00-13:00) and overnight windows (22:00-02:00).
+    if (startMinutes < endMinutes) return timeMinutes >= startMinutes && timeMinutes < endMinutes;
+    if (startMinutes > endMinutes) return timeMinutes >= startMinutes || timeMinutes < endMinutes;
+    return true;
+}
+
+function getActiveMerchantOffers(merchantId, atDate = new Date()) {
+    if (!merchantId) return [];
+    return allOffers.filter(offer => offer.storeId === merchantId && isOfferActiveAt(offer, atDate));
+}
+
+function getBestServiceOffer(serviceName, merchantId, atDate, timeStr, options = {}) {
+    if (!serviceName || !merchantId) return null;
+    const { ignoreTimeRestricted = false } = options;
+    const checkDate = atDate instanceof Date && !isNaN(atDate.getTime()) ? atDate : new Date();
+
+    const candidates = getActiveMerchantOffers(merchantId, checkDate).filter(offer => {
+        if (offer.serviceName !== serviceName) return false;
+        if (!isOfferTimeRestricted(offer)) return true;
+        if (ignoreTimeRestricted || !timeStr) return false;
+        return isTimeWithinOfferWindow(offer, timeStr);
+    });
+
+    if (candidates.length === 0) return null;
+    return candidates.reduce((best, current) => {
+        const bestDiscount = Number(best?.discountPercent || 0);
+        const currentDiscount = Number(current?.discountPercent || 0);
+        return currentDiscount > bestDiscount ? current : best;
+    }, null);
+}
+
+function getServiceBasePrice(service) {
+    const value = Number(service?.basePrice ?? service?.price ?? 0);
+    return Number.isFinite(value) ? value : 0;
+}
+
+function calculateBookingPricing(options = {}) {
+    const merchantId = bookingState?.merchant?.id;
+    const dateStr = options.dateStr ?? bookingState.date;
+    const timeStr = options.timeStr ?? bookingState.time;
+    const includeTimeRestricted = options.includeTimeRestricted ?? true;
+    const selectedDateTime = getBookingDateTime(dateStr, timeStr) || new Date();
+
+    const services = bookingState.services || [];
+    const baseTotal = services.reduce((sum, service) => sum + getServiceBasePrice(service), 0);
+    const totalDuration = services.reduce((sum, service) => sum + (Number(service.duration) || 0), 0);
+
+    let discountTotal = 0;
+    const appliedOffers = [];
+
+    services.forEach(service => {
+        const basePrice = getServiceBasePrice(service);
+        const offer = getBestServiceOffer(service.name, merchantId, selectedDateTime, timeStr, {
+            ignoreTimeRestricted: !includeTimeRestricted
+        });
+        if (!offer) return;
+
+        const discountPercent = Number(offer.discountPercent) || 0;
+        if (discountPercent <= 0) return;
+
+        const discountAmount = Math.round(basePrice * (discountPercent / 100));
+        if (discountAmount <= 0) return;
+
+        discountTotal += discountAmount;
+        appliedOffers.push({
+            serviceName: service.name,
+            discountPercent,
+            discountAmount,
+            validFromTime: offer.validFromTime || null,
+            validToTime: offer.validToTime || null
+        });
+    });
+
+    const finalTotal = Math.max(0, baseTotal - discountTotal);
+    return { baseTotal, discountTotal, finalTotal, totalDuration, appliedOffers };
+}
+
+function calculateTotal(options = {}) {
+    return calculateBookingPricing(options).finalTotal;
+}
+
+function getSlotDiscountSummary(timeStr, dateStr = bookingState.date) {
+    if (!bookingState?.merchant?.id || !dateStr || !Array.isArray(bookingState.services) || bookingState.services.length === 0) {
+        return { hasDiscount: false };
+    }
+
+    const slotDate = getBookingDateTime(dateStr, timeStr);
+    if (!slotDate) return { hasDiscount: false };
+
+    let maxDiscount = 0;
+    let discountedServices = 0;
+
+    bookingState.services.forEach(service => {
+        const offer = getBestServiceOffer(service.name, bookingState.merchant.id, slotDate, timeStr, {
+            ignoreTimeRestricted: false
+        });
+        if (!offer) return;
+        discountedServices++;
+        maxDiscount = Math.max(maxDiscount, Number(offer.discountPercent) || 0);
+    });
+
+    if (discountedServices === 0 || maxDiscount <= 0) {
+        return { hasDiscount: false };
+    }
+
+    const serviceSuffix = discountedServices > 1 ? ` • ${discountedServices} services` : '';
+    return {
+        hasDiscount: true,
+        maxDiscount,
+        discountedServices,
+        label: `${maxDiscount}% OFF${serviceSuffix}`
+    };
+}
+
+async function loadReviewsData() {
+    try {
+        const snapshot = await getDocs(collection(db, "reviews"));
+        allReviews = [];
+        snapshot.forEach(docSnap => {
+            allReviews.push({ id: docSnap.id, ...docSnap.data() });
+        });
+        console.log(`Loaded ${allReviews.length} reviews`);
+    } catch (error) {
+        console.error('Error loading reviews:', error);
     }
 }
 
@@ -481,6 +680,7 @@ async function checkUserExists(phone) {
 
 function updateUIForUser() {
     if (!currentUser) return;
+    resetTransientUIState();
     if (loginBtn) loginBtn.style.display = 'none';
     const profileDiv = document.getElementById('user-profile');
     const userNameSpan = document.getElementById('user-name');
@@ -493,11 +693,9 @@ function updateUIForUser() {
     const mainNav = document.getElementById('main-nav-links');
     const mapBtn = document.getElementById('map-btn');
     if (currentUser.role === 'owner' || currentUser.role === 'admin') {
-        // Hard-remove elements to definitively hide them regardless of CSS cache or flexbox
-        if (mainNav) mainNav.remove(); 
-        if (mapBtn) mapBtn.remove();
+        if (mainNav) mainNav.style.display = 'none';
+        if (mapBtn) mapBtn.style.display = 'none';
     } else {
-        // Customers and guests see these naturally.
         if (mainNav) mainNav.style.display = 'flex';
         if (mapBtn) mapBtn.style.display = 'block';
     }
@@ -526,6 +724,8 @@ function updateUIForUser() {
         if (custDash) custDash.style.display = 'block';
         if (ownerDash) ownerDash.style.display = 'none';
         if (adminDash) adminDash.style.display = 'none';
+        const navMyAppts = document.getElementById('nav-my-appointments');
+        if (navMyAppts) navMyAppts.style.display = 'flex';
     }
 }
 
@@ -572,6 +772,24 @@ async function loadMerchants() {
 }
 
 // Render Grid with Photos
+function getStoreRating(storeId) {
+    const storeReviews = allReviews.filter(r => r.storeId === storeId);
+    if (storeReviews.length === 0) return { avg: 0, count: 0 };
+    const sum = storeReviews.reduce((acc, r) => acc + (r.rating || 0), 0);
+    return { avg: (sum / storeReviews.length).toFixed(1), count: storeReviews.length };
+}
+
+function generateStarHTML(rating, maxStars = 5) {
+    let html = '';
+    const fullStars = Math.floor(rating);
+    const hasHalf = rating - fullStars >= 0.3;
+    for (let i = 0; i < fullStars; i++) html += '★';
+    if (hasHalf && fullStars < maxStars) html += '★';
+    const remaining = maxStars - fullStars - (hasHalf ? 1 : 0);
+    for (let i = 0; i < remaining; i++) html += '☆';
+    return html;
+}
+
 function renderMerchants() {
     const filtered = currentFilter === 'all'
         ? allMerchants
@@ -590,13 +808,19 @@ function renderMerchants() {
 
         // Check if this merchant has active offers
         const now = new Date();
-        const merchantOffers = allOffers.filter(o => {
-            if (o.storeId !== merchant.id) return false;
-            const endDate = o.endDate?.toDate ? o.endDate.toDate() : new Date(o.endDate);
-            return endDate > now && o.active;
-        });
+        const merchantOffers = getActiveMerchantOffers(merchant.id, now);
         const hasDiscount = merchantOffers.length > 0;
         const maxDiscount = hasDiscount ? Math.max(...merchantOffers.map(o => o.discountPercent)) : 0;
+
+        // Get star rating
+        const rating = getStoreRating(merchant.id);
+        const ratingHTML = rating.count > 0
+            ? `<div class="card-rating">
+                    <span class="stars">${generateStarHTML(parseFloat(rating.avg))}</span>
+                    <span class="rating-score">${rating.avg}</span>
+                    <span class="rating-count">(${rating.count})</span>
+               </div>`
+            : `<div class="card-rating"><span class="rating-count" style="color:#9ca3af;">No reviews yet</span></div>`;
 
         return `
         <div class="merchant-card" onclick="openMerchantDetails('${merchant.id}')">
@@ -607,6 +831,7 @@ function renderMerchants() {
             <div class="card-body">
                 <span class="card-tag">${merchant.category}</span>
                 <h3 class="card-title">${merchant.name}</h3>
+                ${ratingHTML}
                 <div class="card-meta">
                     <span>${merchant.distance}</span>
                 </div>
@@ -796,88 +1021,93 @@ window.initMapCallback = function () {
 }
 
 // Global scope for HTML access
-// Global scope for HTML access
 let bookingState = {
     merchant: null,
     services: [],
+    selectedStaff: null,
     date: null,
     time: null,
     step: 1,
-    bookedSlots: null
+    bookedSlots: null,
+    policyAgreed: false
 };
 
-window.openMerchantDetails = function (id, preselectedServiceJson = null) {
-    const merchant = allMerchants.find(m => m.id === id);
-    if (!merchant) return;
-
-    let initialServices = [];
-    if (preselectedServiceJson) {
-        try {
-            const preselectedService = JSON.parse(decodeURIComponent(preselectedServiceJson));
-            const now = new Date();
-            
-            // Apply offer discount if available
-            const merchantOffers = allOffers.filter(o => {
-                if (o.storeId !== merchant.id) return false;
-                const endDate = o.endDate?.toDate ? o.endDate.toDate() : new Date(o.endDate);
-                return endDate > now && o.active;
-            });
-            const offer = merchantOffers.find(o => o.serviceName === preselectedService.name);
-            const discountPercent = offer ? offer.discountPercent : 0;
-            const currentPrice = offer ? Math.round(preselectedService.price * (1 - discountPercent / 100)) : preselectedService.price;
-            
-            initialServices.push({
-                name: preselectedService.name,
-                price: currentPrice,
-                duration: preselectedService.duration
-            });
-        } catch(e) {
-            console.error("Failed to parse preselected service:", e);
-        }
-    }
-
-    // Reset State
-    // Clear booked slots cache for fresh data
-    bookedSlotsCache = {};
+function resetBookingState() {
     bookingState = {
-        merchant: merchant,
-        services: initialServices,
+        merchant: null,
+        services: [],
+        selectedStaff: null,
         date: null,
         time: null,
         step: 1,
-        bookedSlots: null
+        bookedSlots: null,
+        policyAgreed: false
     };
+    bookingCalendarMonth = new Date();
+    bookedSlotsCache = {};
+}
 
-    renderBookingWizard();
-    document.getElementById('booking-modal').style.display = 'flex';
+function resetTransientUIState() {
+    document.querySelectorAll('.modal').forEach(modal => {
+        modal.style.display = 'none';
+    });
+
+    const venueProfileView = document.getElementById('venue-profile-view');
+    if (venueProfileView) {
+        venueProfileView.style.display = 'none';
+    }
+
+    const dropdownMenu = document.getElementById('user-dropdown-menu');
+    if (dropdownMenu) {
+        dropdownMenu.style.display = 'none';
+    }
+
+    isPickingLocation = false;
+    pickedLocation = null;
+    if (pickerMarker) {
+        pickerMarker.setMap(null);
+        pickerMarker = null;
+    }
+
+    const confirmLocationBtn = document.getElementById('btn-confirm-location');
+    if (confirmLocationBtn) {
+        confirmLocationBtn.style.display = 'none';
+    }
+
+    resetBookingState();
 }
 
 function renderBookingWizard() {
     const body = document.getElementById('booking-modal-body');
     const footer = document.getElementById('booking-modal-footer');
     
-    // Hide default close button for step 3 if we want to show our own top bar
+    // Hide default close button for step 4 if we want to show our own top bar
     const defaultCloseBtn = document.querySelector('.close-booking');
     if (defaultCloseBtn) {
-        defaultCloseBtn.style.display = bookingState.step === 3 ? 'none' : 'block';
+        defaultCloseBtn.style.display = bookingState.step === 4 ? 'none' : 'block';
     }
 
     let content = '';
 
-    if (bookingState.step === 3) {
-        // Step 3 specific top bar
+    if (bookingState.step === 4) {
+        // Step 4 specific top bar
         content += `
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #f0f0f0; padding-bottom: 15px; margin-bottom: 20px;">
-                <h3 style="margin: 0; font-weight: 700; font-size: 1.1rem; color: #333;">Book Appointment</h3>
+                <h3 style="margin: 0; font-weight: 700; font-size: 1.1rem; color: #333;">Confirm Appointment</h3>
                 <span style="font-size: 1.5rem; cursor: pointer; color: #888; line-height: 1;" onclick="closeModal('booking-modal')">&times;</span>
             </div>
         `;
     } else {
-        // Header (Static for steps 1 and 2)
+        // Header (Static for steps 1, 2 and 3)
+        let headerStepText = '';
+        if(bookingState.step === 1) headerStepText = 'Step 1 of 3: Select Services';
+        if(bookingState.step === 2) headerStepText = 'Step 2 of 3: Select Staff';
+        if(bookingState.step === 3) headerStepText = 'Step 3 of 3: Date & Time';
+
         content += `
             <div class="modal-header" style="text-align: center; margin-bottom: 20px;">
                 <h2 style="margin-bottom: 5px;">${bookingState.merchant.name}</h2>
-                <p style="color: #666;">Step ${bookingState.step} of 2</p>
+                <p style="color: #666;">${headerStepText}</p>
             </div>
         `;
     }
@@ -890,18 +1120,32 @@ function renderBookingWizard() {
             <button class="btn-primary" onclick="nextBookingStep()" ${bookingState.services.length === 0 ? 'disabled' : ''}>Next </button>
         `;
     }
-    // Step 2: Select Date & Time
+    // Step 2: Select Staff
     else if (bookingState.step === 2) {
-        content += renderBookingStep2();
+        content += renderBookingStepStaff();
+        const canProceed = !!bookingState.selectedStaff;
         footer.innerHTML = `
             <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
-            <button class="btn-primary" onclick="nextBookingStep()" ${!bookingState.date || !bookingState.time ? 'disabled' : ''}>Next </button>
+            <button class="btn-primary" onclick="nextBookingStep()" ${!canProceed ? 'disabled' : ''}>Next </button>
         `;
     }
-    // Step 3: Confirm
+    // Step 3: Select Date & Time
     else if (bookingState.step === 3) {
+        content += renderBookingStep2();
+        
+        const needsPolicy = !!bookingState.merchant.cancellationPolicy;
+        const canProceed = bookingState.date && bookingState.time && (!needsPolicy || bookingState.policyAgreed);
+        
+        footer.innerHTML = `
+            <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
+            <button class="btn-primary" onclick="nextBookingStep()" ${!canProceed ? 'disabled' : ''}>Next </button>
+        `;
+    }
+    // Step 4: Confirm
+    else if (bookingState.step === 4) {
         content += renderBookingStep3();
         footer.innerHTML = `
+            <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
             <button class="btn-primary full-width" onclick="submitBooking()" style="background: #C19A6B; border: none; font-size: 1.05rem; padding: 14px; border-radius: 8px; font-weight: 500;">Confirm Booking</button>
         `;
     }
@@ -910,46 +1154,77 @@ function renderBookingWizard() {
 }
 
 
+
 // --- STEP 1: SERVICES ---
 function renderBookingStep1() {
     const merchant = bookingState.merchant;
     const now = new Date();
 
     // Get active offers
-    const merchantOffers = allOffers.filter(o => {
-        if (o.storeId !== merchant.id) return false;
-        const endDate = o.endDate?.toDate ? o.endDate.toDate() : new Date(o.endDate);
-        return endDate > now && o.active;
-    });
+    const merchantOffers = getActiveMerchantOffers(merchant.id, now);
 
-    const servicesList = merchant.services ? merchant.services.map((s, index) => {
+    const servicesList = merchant.services ? merchant.services.map((s) => {
         const isSelected = bookingState.services.some(sel => sel.name === s.name);
+        const basePrice = Number(s.price) || 0;
+        const duration = Number(s.duration) || 0;
+        const serviceOffers = merchantOffers.filter(o => o.serviceName === s.name);
+        const allDayOffers = serviceOffers.filter(o => !isOfferTimeRestricted(o));
+        const timedOffers = serviceOffers.filter(o => isOfferTimeRestricted(o));
 
-        // Calculate Price with Offer
-        const offer = merchantOffers.find(o => o.serviceName === s.name);
-        const hasDiscount = !!offer;
-        const discountPercent = offer?.discountPercent || 0;
-        const currentPrice = hasDiscount ? Math.round(s.price * (1 - discountPercent / 100)) : s.price;
+        const bestAllDayOffer = allDayOffers.reduce((best, current) => {
+            const bestDiscount = Number(best?.discountPercent || 0);
+            const currentDiscount = Number(current?.discountPercent || 0);
+            return currentDiscount > bestDiscount ? current : best;
+        }, null);
+
+        const bestTimedOffer = timedOffers.reduce((best, current) => {
+            const bestDiscount = Number(best?.discountPercent || 0);
+            const currentDiscount = Number(current?.discountPercent || 0);
+            return currentDiscount > bestDiscount ? current : best;
+        }, null);
+
+        const allDayDiscount = Number(bestAllDayOffer?.discountPercent || 0);
+        const hasAllDayDeal = allDayDiscount > 0;
+        const displayPrice = hasAllDayDeal ? Math.round(basePrice * (1 - allDayDiscount / 100)) : basePrice;
+
+        let offerTag = '';
+        let offerHint = '';
+        if (hasAllDayDeal) {
+            offerTag = `<span class="service-discount-tag">${allDayDiscount}% OFF</span>`;
+        } else if (bestTimedOffer) {
+            offerTag = `<span class="service-discount-tag">${Number(bestTimedOffer.discountPercent) || 0}% OFF</span>`;
+            offerHint = `<div class="service-offpeak-hint">Valid ${formatOfferHours(bestTimedOffer)}</div>`;
+        }
+
+        const safeServiceName = (s.name || '').replace(/'/g, "\\'");
+        const priceHtml = hasAllDayDeal
+            ? `<div style="display:flex; flex-direction:column; align-items:flex-end; line-height:1.2;">
+                   <span style="font-size: 0.78rem; color: #9ca3af; text-decoration: line-through;">${basePrice.toLocaleString()} IQD</span>
+                   <span>${displayPrice.toLocaleString()} IQD</span>
+               </div>`
+            : `${displayPrice.toLocaleString()} IQD`;
 
         return `
-        <div class="service-select-item ${isSelected ? 'selected' : ''}" onclick="toggleServiceSelection('${s.name}', ${currentPrice}, ${s.duration})">
+        <div class="service-select-item ${isSelected ? 'selected' : ''}" onclick="toggleServiceSelection('${safeServiceName}', ${basePrice}, ${duration})">
             <div style="display: flex; align-items: center;">
                 <div class="checkbox-circle"></div>
                 <div>
                     <div style="font-weight: 500;">
-                        ${s.name} ${hasDiscount ? `<span class="service-discount-tag">${discountPercent}% OFF</span>` : ''}
+                        ${s.name} ${offerTag}
                     </div>
-                    <div style="font-size: 0.8rem; color: #666;">${s.duration} mins</div>
+                    <div style="font-size: 0.8rem; color: #666;">${duration} mins</div>
+                    ${offerHint}
                 </div>
             </div>
-            <div style="font-weight: 600;">${currentPrice.toLocaleString()} IQD</div>
+            <div style="font-weight: 600;">${priceHtml}</div>
         </div>
         `;
     }).join('') : '<p>No services available.</p>';
 
-    // Calculate Totals
-    const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
-    const totalTime = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
+    const previewPricing = calculateBookingPricing({ includeTimeRestricted: false });
+    const hasTimeRestrictedDeals = bookingState.services.some(service =>
+        merchantOffers.some(offer => offer.serviceName === service.name && isOfferTimeRestricted(offer))
+    );
 
     return `
         <h3 style="margin-bottom: 15px;">Select Services</h3>
@@ -958,15 +1233,17 @@ function renderBookingStep1() {
         </div>
         <div class="booking-total">
             <span>Total (${bookingState.services.length} services):</span>
-            <span>${totalCost.toLocaleString()} IQD</span>
+            <span>${previewPricing.finalTotal.toLocaleString()} IQD</span>
         </div>
+        ${previewPricing.discountTotal > 0 ? `<div style="margin-top: 6px; font-size: 0.8rem; color: #16a34a;">All-day discounts applied: -${previewPricing.discountTotal.toLocaleString()} IQD</div>` : ''}
+        ${hasTimeRestrictedDeals ? `<div style="margin-top: 6px; font-size: 0.8rem; color: #6b7280;">Off-peak deals will be applied automatically when you select eligible time slots.</div>` : ''}
     `;
 }
 
-window.toggleServiceSelection = function (name, price, duration) {
+window.toggleServiceSelection = function (name, basePrice, duration) {
     const index = bookingState.services.findIndex(s => s.name === name);
     if (index === -1) {
-        bookingState.services.push({ name, price, duration });
+        bookingState.services.push({ name, price: basePrice, basePrice, duration });
     } else {
         bookingState.services.splice(index, 1);
     }
@@ -1045,8 +1322,19 @@ function formatTime12h(time) {
     return `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
 }
 
-function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, workerCount) {
+function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, workerCount, offerSummary = null) {
     const display = formatTime12h(time);
+    const hasDiscount = !!offerSummary?.hasDiscount;
+    const dealClass = hasDiscount ? 'deal' : '';
+    const dealBadge = hasDiscount ? `<span class="time-slot-deal-badge">${offerSummary.label}</span>` : '';
+
+    if (offerSummary?.isPastTime) {
+        return `<div class="time-slot booked past" title="This time has already passed">
+            <span style="text-decoration: line-through;">${display}</span>
+            <span style="font-size:0.65rem; display:block; color:#9ca3af;">Passed</span>
+        </div>`;
+    }
+
     if (spotsLeft <= 0) {
         // Fully booked
         return `<div class="time-slot booked" title="All ${workerCount} workers booked">
@@ -1055,13 +1343,17 @@ function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, wo
         </div>`;
     } else if (bookedCount > 0) {
         // Partially booked — still available
-        return `<div class="time-slot partial ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')" title="${spotsLeft} of ${workerCount} workers available">
+        return `<div class="time-slot partial ${dealClass} ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')" title="${spotsLeft} of ${workerCount} workers available">
             <span>${display}</span>
+            ${dealBadge}
             <span style="font-size:0.6rem; display:block; color:#d97706;">${spotsLeft} spot${spotsLeft > 1 ? 's' : ''} left</span>
         </div>`;
     } else {
         // Fully available
-        return `<div class="time-slot ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')">${display}</div>`;
+        return `<div class="time-slot ${dealClass} ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')">
+            <span>${display}</span>
+            ${dealBadge}
+        </div>`;
     }
 }
 
@@ -1131,53 +1423,82 @@ function renderBookingStep2() {
         } else {
             const startHour = 10;
             const endHour = 20;
+            const selectedDate = new Date(bookingState.date);
+            const now = new Date();
+            const isTodaySelected = selectedDate.toDateString() === now.toDateString();
+            const currentMinutes = (now.getHours() * 60) + now.getMinutes();
             const bookedSlots = bookingState.bookedSlots || new Map();
             const workerCount = bookingState.merchant.workerCount || 1;
-            const totalSlots = (endHour - startHour) * 2;
+            let openSlotCount = 0;
             let fullyBookedCount = 0;
-            let partialCount = 0;
+            let pastSlotCount = 0;
+            let discountedSlotCount = 0;
+            const slotEntries = [];
 
-            // Count fully booked and partial slots
             for (let h = startHour; h < endHour; h++) {
                 ['00', '30'].forEach(m => {
                     const timeKey = `${h}:${m}`;
                     const count = bookedSlots.get(timeKey) || 0;
-                    if (count >= workerCount) fullyBookedCount++;
-                    else if (count > 0) partialCount++;
+                    const spotsLeft = workerCount - count;
+                    const isSelected = bookingState.time === timeKey;
+                    const offerSummary = getSlotDiscountSummary(timeKey, bookingState.date);
+                    const slotMinutes = parseTimeToMinutes(timeKey);
+                    const isPastTime = isTodaySelected && slotMinutes !== null && slotMinutes <= currentMinutes;
+
+                    if (isPastTime) {
+                        pastSlotCount++;
+                    } else if (count >= workerCount) {
+                        fullyBookedCount++;
+                    } else {
+                        openSlotCount++;
+                        if (offerSummary.hasDiscount) discountedSlotCount++;
+                    }
+
+                    slotEntries.push({
+                        time: timeKey,
+                        count,
+                        spotsLeft,
+                        isSelected,
+                        offerSummary: {
+                            ...offerSummary,
+                            isPastTime
+                        }
+                    });
                 });
             }
-            const availCount = totalSlots - fullyBookedCount;
 
             timesHtml = `
                 <div class="booking-times-header">
                     <h4> ${new Date(bookingState.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</h4>
                     <div class="slots-summary">
-                        <span class="slots-available"> ${availCount} Open</span>
+                        <span class="slots-available"> ${openSlotCount} Open</span>
                         ${fullyBookedCount > 0 ? `<span class="slots-booked"> ${fullyBookedCount} Full</span>` : ''}
+                        ${pastSlotCount > 0 ? `<span class="slots-booked"> ${pastSlotCount} Passed</span>` : ''}
+                        ${discountedSlotCount > 0 ? `<span class="slots-deals"> ${discountedSlotCount} Deal Slots</span>` : ''}
                         ${workerCount > 1 ? `<span style="color:#666;font-size:0.75rem;"> ${workerCount} workers</span>` : ''}
                     </div>
                 </div>
                 <div class="time-slots-grid">
             `;
 
-            for (let h = startHour; h < endHour; h++) {
-                const time1 = `${h}:00`;
-                const isSel1 = bookingState.time === time1;
-                const count1 = bookedSlots.get(time1) || 0;
-                const spotsLeft1 = workerCount - count1;
-                timesHtml += renderTimeSlotWithCapacity(time1, isSel1, count1, spotsLeft1, workerCount);
-
-                const time2 = `${h}:30`;
-                const isSel2 = bookingState.time === time2;
-                const count2 = bookedSlots.get(time2) || 0;
-                const spotsLeft2 = workerCount - count2;
-                timesHtml += renderTimeSlotWithCapacity(time2, isSel2, count2, spotsLeft2, workerCount);
-            }
+            slotEntries.forEach(slot => {
+                timesHtml += renderTimeSlotWithCapacity(
+                    slot.time,
+                    slot.isSelected,
+                    slot.count,
+                    slot.spotsLeft,
+                    workerCount,
+                    slot.offerSummary
+                );
+            });
 
             timesHtml += `</div>`;
         }
     }
 
+    const selectedSlotSummary = bookingState.date && bookingState.time
+        ? getSlotDiscountSummary(bookingState.time, bookingState.date)
+        : { hasDiscount: false };
     const canGoPrev = month > new Date().getMonth() || year > new Date().getFullYear();
 
     return `
@@ -1197,6 +1518,22 @@ function renderBookingStep2() {
                 <p> Select a date on the calendar to see available time slots</p>
             </div>
         `}
+        ${selectedSlotSummary.hasDiscount ? `
+            <div style="margin-top: 10px; padding: 10px 12px; border: 1px solid rgba(193,154,107,0.35); background: rgba(193,154,107,0.08); border-radius: 8px; font-size: 0.82rem; color: #6b4f2c;">
+                Deal applied for this slot: <strong>${selectedSlotSummary.label}</strong>
+            </div>
+        ` : ''}
+        
+        ${bookingState.date && bookingState.time && bookingState.merchant.cancellationPolicy ? `
+            <div class="booking-policy-box" style="margin-top: 20px; padding: 15px; background: #fdf2f8; border-radius: 8px; border: 1px solid #fbcfe8;">
+                <h4 style="margin-bottom: 8px; color: #9d174d; font-size: 0.95rem;">Cancellation & No-Show Policy</h4>
+                <p style="font-size: 0.85rem; color: #831843; margin-bottom: 12px;">${bookingState.merchant.cancellationPolicy}</p>
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem; color: #4b5563;">
+                    <input type="checkbox" id="booking-policy-check" onchange="togglePolicyAgreement(this.checked)" ${bookingState.policyAgreed ? 'checked' : ''} style="width: 16px; height: 16px; accent-color: var(--primary);">
+                    I agree to the cancellation policy
+                </label>
+            </div>
+        ` : ''}
     `;
 }
 
@@ -1208,8 +1545,11 @@ window.changeBookingCalMonth = function (offset) {
 window.selectBookingDate = async function (dateStr) {
     bookingState.date = dateStr;
     bookingState.time = null;
+    bookingState.policyAgreed = false;
     bookingState.bookedSlots = undefined;
     renderBookingWizard();
+    
+    // ... rest of the logic ...
 
     const bookedSlots = await fetchBookedSlots(bookingState.merchant.id, dateStr);
     bookingState.bookedSlots = bookedSlots;
@@ -1218,13 +1558,24 @@ window.selectBookingDate = async function (dateStr) {
 
 window.selectBookingTime = function (timeStr) {
     bookingState.time = timeStr;
+    bookingState.policyAgreed = false;
+    renderBookingWizard();
+}
+
+window.togglePolicyAgreement = function (checked) {
+    bookingState.policyAgreed = checked;
     renderBookingWizard();
 }
 
 // --- STEP 3: CONFIRM ---
 function renderBookingStep3() {
-    const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
-    const totalDuration = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
+    const pricing = calculateBookingPricing({
+        dateStr: bookingState.date,
+        timeStr: bookingState.time,
+        includeTimeRestricted: true
+    });
+    const totalCost = pricing.finalTotal;
+    const totalDuration = pricing.totalDuration;
     const serviceNames = bookingState.services.map(s => s.name).join(', ');
 
     // Date formatting (e.g., "Tue, Mar 31")
@@ -1268,6 +1619,12 @@ function renderBookingStep3() {
                 <span style="color: #888; font-size: 0.95rem;">Service</span>
                 <span style="color: #333; font-weight: 500; font-size: 0.95rem; text-align: right; max-width: 60%;">${serviceNames}</span>
             </div>
+            ${bookingState.selectedStaff ? `
+            <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                <span style="color: #888; font-size: 0.95rem;">Staff Member</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${bookingState.selectedStaff.name}</span>
+            </div>
+            ` : ''}
             <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
                 <span style="color: #888; font-size: 0.95rem;">Duration</span>
                 <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${totalDuration} minutes</span>
@@ -1282,6 +1639,17 @@ function renderBookingStep3() {
             </div>
             
             <div style="height: 1px; background: #EBEBEB; margin: 20px 0;"></div>
+
+            ${pricing.discountTotal > 0 ? `
+            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                <span style="color: #888; font-size: 0.92rem;">Subtotal</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.92rem;">${pricing.baseTotal.toLocaleString()} IQD</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                <span style="color: #16a34a; font-size: 0.92rem;">Discount</span>
+                <span style="color: #16a34a; font-weight: 600; font-size: 0.92rem;">-${pricing.discountTotal.toLocaleString()} IQD</span>
+            </div>
+            ` : ''}
             
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0;">
                 <span style="color: #888; font-size: 0.95rem;">Total</span>
@@ -1304,13 +1672,69 @@ function renderBookingStep3() {
 }
 
 // Navigation
+// --- STEP 2: STAFF SELECTION ---
+window.selectStaff = function(staffId, staffName) {
+    bookingState.selectedStaff = { id: staffId, name: staffName };
+    renderBookingWizard();
+}
+
+function renderBookingStepStaff() {
+    const staff = bookingState.merchant.staff || [];
+    
+    let staffHTML = `
+        <div class="staff-selection-container" style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px; max-height: 400px; overflow-y: auto;">
+            <div class="staff-card ${bookingState.selectedStaff?.id === 'anyone' ? 'selected' : ''}" 
+                 onclick="selectStaff('anyone', 'Anyone available')"
+                 style="display: flex; align-items: center; padding: 15px; border: 1px solid ${bookingState.selectedStaff?.id === 'anyone' ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; cursor: pointer; transition: all 0.2s; background: ${bookingState.selectedStaff?.id === 'anyone' ? '#fdfdfb' : '#fff'};">
+                <div style="width: 50px; height: 50px; border-radius: 50%; background: #f3f4f6; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; color: #666; margin-right: 15px;">🌟</div>
+                <div>
+                    <h4 style="margin: 0; font-size: 1.1rem;">Anyone available</h4>
+                    <p style="margin: 4px 0 0; font-size: 0.85rem; color: #666;">Maximum availability</p>
+                </div>
+            </div>
+    `;
+
+    staff.forEach((st, idx) => {
+        const isSelected = bookingState.selectedStaff?.id === idx;
+        const defaultIcon = `<div style="width: 50px; height: 50px; border-radius: 50%; background: #e2e8f0; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #64748b; margin-right: 15px; font-size: 1.2rem;">${st.name.charAt(0)}</div>`;
+        const imgIcon = `<img src="${st.image}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover; margin-right: 15px;">`;
+
+        staffHTML += `
+            <div class="staff-card ${isSelected ? 'selected' : ''}" 
+                 onclick="selectStaff(${idx}, '${st.name.replace(/'/g, "\\'")}')"
+                 style="display: flex; align-items: center; padding: 15px; border: 1px solid ${isSelected ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; cursor: pointer; transition: all 0.2s; background: ${isSelected ? '#fdfdfb' : '#fff'};">
+                ${st.image ? imgIcon : defaultIcon}
+                <div>
+                    <h4 style="margin: 0; font-size: 1.1rem;">${st.name}</h4>
+                    <p style="margin: 4px 0 0; font-size: 0.85rem; color: #666;">${st.role || 'Staff'}</p>
+                </div>
+            </div>
+        `;
+    });
+
+    staffHTML += `</div>`;
+    return staffHTML;
+}
+
+// Navigation
 window.nextBookingStep = function () {
     bookingState.step++;
+    if (bookingState.step === 2) {
+        if (!bookingState.merchant.staff || bookingState.merchant.staff.length === 0) {
+            bookingState.selectedStaff = { id: 'anyone', name: 'Anyone available' };
+            bookingState.step++; 
+        }
+    }
     renderBookingWizard();
 }
 
 window.prevBookingStep = function () {
     bookingState.step--;
+    if (bookingState.step === 2) {
+        if (!bookingState.merchant.staff || bookingState.merchant.staff.length === 0) {
+            bookingState.step--; 
+        }
+    }
     renderBookingWizard();
 }
 
@@ -1323,19 +1747,18 @@ window.submitBooking = async function () {
         return;
     }
 
-    const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
-    const totalDuration = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
-
-    // Create Date Object - parse properly to avoid browser inconsistencies
-    const selectedDate = new Date(bookingState.date);
-    const [hours, minutes] = bookingState.time.split(':').map(Number);
-    const bookingDateObj = new Date(
-        selectedDate.getFullYear(),
-        selectedDate.getMonth(),
-        selectedDate.getDate(),
-        hours,
-        minutes
-    );
+    const pricing = calculateBookingPricing({
+        dateStr: bookingState.date,
+        timeStr: bookingState.time,
+        includeTimeRestricted: true
+    });
+    const totalCost = pricing.finalTotal;
+    const totalDuration = pricing.totalDuration;
+    const bookingDateObj = getBookingDateTime(bookingState.date, bookingState.time);
+    if (!bookingDateObj) {
+        showToast("Invalid date/time selected.", 'error');
+        return;
+    }
 
     // Validate booking date is not in the past
     if (bookingDateObj < new Date()) {
@@ -1343,8 +1766,13 @@ window.submitBooking = async function () {
         return;
     }
 
-    // Recalculate commission from verified service prices (10%)
+    // Recalculate commission from final discounted total (10%)
     const commission = Math.round(totalCost * 0.1);
+    const bookingServices = bookingState.services.map(service => ({
+        name: service.name,
+        price: getServiceBasePrice(service),
+        duration: Number(service.duration) || 0
+    }));
 
     try {
         const bookingData = {
@@ -1355,12 +1783,16 @@ window.submitBooking = async function () {
             merchantId: bookingState.merchant.id,
             storeName: bookingState.merchant.name,
 
-            services: bookingState.services,
+            services: bookingServices,
+            staffMember: bookingState.selectedStaff || null,
 
             serviceName: bookingState.services.map(s => s.name).join(', '),
             servicePrice: totalCost,
             price: totalCost,
             serviceDuration: totalDuration,
+            basePriceTotal: pricing.baseTotal,
+            discountTotal: pricing.discountTotal,
+            appliedOffers: pricing.appliedOffers,
 
             bookingDate: bookingDateObj,
             bookingTime: bookingState.time,
@@ -1407,6 +1839,7 @@ window.addEventListener('DOMContentLoaded', () => {
             if (tab.dataset.tab === 'stores') loadAdminStores();
             if (tab.dataset.tab === 'offers') loadAdminOffers();
             if (tab.dataset.tab === 'sponsors') loadAdminSponsors();
+            if (tab.dataset.tab === 'orders') loadAdminOrders('all');
             if (tab.dataset.tab === 'financials') loadFinancials();
             if (tab.dataset.tab === 'users') loadAdminUsers();
         });
@@ -1488,6 +1921,9 @@ window.editStore = function (id) {
     document.getElementById('store-name').value = store.name;
     document.getElementById('store-type').value = store.type;
     document.getElementById('store-address').value = store.address || '';
+    
+    const policyEl = document.getElementById('store-cancellation-policy');
+    if (policyEl) policyEl.value = store.cancellationPolicy || '';
 
     const latEl = document.getElementById('store-lat');
     const lngEl = document.getElementById('store-lng');
@@ -1604,7 +2040,7 @@ function renderServicesForReorder(services) {
     }
 
     container.innerHTML = services.map((s, i) => `
-        <div class="sortable-item" draggable="true" data-index="${i}" data-name="${s.name}" data-price="${s.price}" data-duration="${s.duration}">
+        <div class="sortable-item" draggable="true" data-index="${i}" data-name="${s.name}" data-category="${s.category || ''}" data-price="${s.price}" data-duration="${s.duration}">
             <div class="drag-handle">
                 <div class="drag-handle-bar"></div>
                 <div class="drag-handle-bar"></div>
@@ -1751,6 +2187,7 @@ window.openEditServiceModal = function (index) {
     document.getElementById('service-modal-title').textContent = 'Edit Service';
     document.getElementById('service-edit-index').value = index;
     document.getElementById('service-edit-name').value = item.dataset.name;
+    document.getElementById('service-edit-category').value = item.dataset.category || '';
     document.getElementById('service-edit-price').value = item.dataset.price;
     document.getElementById('service-edit-duration').value = item.dataset.duration;
 
@@ -1762,6 +2199,7 @@ window.openAddServiceModal = function () {
     document.getElementById('service-modal-title').textContent = 'Add New Service';
     document.getElementById('service-edit-index').value = '-1'; // -1 indicates new service
     document.getElementById('service-form').reset();
+    document.getElementById('service-edit-category').value = '';
 
     document.getElementById('service-modal').style.display = 'flex';
 };
@@ -1788,6 +2226,7 @@ document.getElementById('service-form')?.addEventListener('submit', function (e)
 
     const index = parseInt(document.getElementById('service-edit-index').value);
     const name = document.getElementById('service-edit-name').value.trim();
+    const category = document.getElementById('service-edit-category').value.trim();
     const price = parseInt(document.getElementById('service-edit-price').value);
     const duration = parseInt(document.getElementById('service-edit-duration').value);
 
@@ -1803,7 +2242,7 @@ document.getElementById('service-form')?.addEventListener('submit', function (e)
         // Adding new service
         const newIndex = items.length;
         const newItemHtml = `
-            <div class="sortable-item" draggable="true" data-index="${newIndex}" data-name="${name}" data-price="${price}" data-duration="${duration}">
+            <div class="sortable-item" draggable="true" data-index="${newIndex}" data-name="${name}" data-category="${category}" data-price="${price}" data-duration="${duration}">
                 <div class="drag-handle">
                     <div class="drag-handle-bar"></div>
                     <div class="drag-handle-bar"></div>
@@ -1842,6 +2281,7 @@ document.getElementById('service-form')?.addEventListener('submit', function (e)
         const item = items[index];
         if (item) {
             item.dataset.name = name;
+            item.dataset.category = category;
             item.dataset.price = price;
             item.dataset.duration = duration;
             item.querySelector('.service-name').textContent = name;
@@ -1876,7 +2316,13 @@ window.toggleSuspend = async function (id, suspend) {
 
 // Close modal
 window.closeModal = function (modalId) {
-    document.getElementById(modalId).style.display = 'none';
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    modal.style.display = 'none';
+
+    if (modalId === 'booking-modal') {
+        resetBookingState();
+    }
 };
 
 // Helper to upload image
@@ -1915,6 +2361,7 @@ document.getElementById('store-form')?.addEventListener('submit', async (e) => {
             type: document.getElementById('store-type').value,
             category: document.getElementById('store-category').value,
             address: document.getElementById('store-address').value,
+            cancellationPolicy: document.getElementById('store-cancellation-policy')?.value || '',
             lat: latEl ? (parseFloat(latEl.value) || null) : null,
             lng: lngEl ? (parseFloat(lngEl.value) || null) : null,
             photoUrl: photoUrl
@@ -1928,6 +2375,7 @@ document.getElementById('store-form')?.addEventListener('submit', async (e) => {
             serviceItems.forEach(item => {
                 services.push({
                     name: item.dataset.name,
+                    category: item.dataset.category || '',
                     price: parseInt(item.dataset.price),
                     duration: parseInt(item.dataset.duration)
                 });
@@ -1972,7 +2420,7 @@ async function loadAdminOffers() {
     const tbody = document.getElementById('offers-tbody');
     if (!tbody) return;
 
-    tbody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
 
     try {
         const snapshot = await getDocs(collection(db, "offers"));
@@ -1982,26 +2430,39 @@ async function loadAdminOffers() {
         });
 
         if (allOffers.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">No offers yet</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #888;">No offers yet</td></tr>';
             return;
         }
 
         const now = new Date();
         tbody.innerHTML = allOffers.map(offer => {
             const store = allMerchants.find(m => m.id === offer.storeId);
-            const endDate = offer.endDate?.toDate ? offer.endDate.toDate() : new Date(offer.endDate);
-            const isExpired = endDate < now;
-            const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+            const startDate = toSafeDate(offer.startDate);
+            const endDate = toSafeDate(offer.endDate);
+            const isScheduled = startDate ? startDate > now : false;
+            const isExpired = endDate ? endDate < now : false;
+            const isActive = offer.active && !isScheduled && !isExpired;
+            const daysLeft = endDate ? Math.ceil((endDate - now) / (1000 * 60 * 60 * 24)) : null;
+            const durationLabel = isExpired
+                ? 'Ended'
+                : isScheduled
+                    ? `Starts ${startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+                    : daysLeft !== null
+                        ? `${daysLeft} days left`
+                        : 'No end date';
+            const statusText = isExpired ? 'Expired' : isScheduled ? 'Scheduled' : isActive ? 'Active' : 'Inactive';
+            const statusClass = isExpired ? 'expired' : isScheduled ? 'suspended' : isActive ? 'active' : 'suspended';
 
             return `
             <tr>
                 <td>${store?.name || 'Unknown'}</td>
                 <td>${offer.serviceName}</td>
                 <td><strong style="color: #16a34a;">${offer.discountPercent}% OFF</strong></td>
-                <td>${isExpired ? 'Ended' : `${daysLeft} days left`}</td>
+                <td>${formatOfferHours(offer)}</td>
+                <td>${durationLabel}</td>
                 <td>
-                    <span class="status-badge ${isExpired ? 'expired' : 'active'}">
-                        ${isExpired ? ' Expired' : ' Active'}
+                    <span class="status-badge ${statusClass}">
+                        ${statusText}
                     </span>
                 </td>
                 <td>
@@ -2011,21 +2472,33 @@ async function loadAdminOffers() {
         `}).join('');
     } catch (error) {
         console.error('Error loading offers:', error);
-        tbody.innerHTML = '<tr><td colspan="6">Error loading offers</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7">Error loading offers</td></tr>';
     }
 }
 
 window.openCreateOfferModal = function () {
+    const offerForm = document.getElementById('offer-form');
     const storeSelect = document.getElementById('offer-store');
-    storeSelect.innerHTML = allMerchants
-        .filter(m => !m.suspended)
+    if (!offerForm || !storeSelect) return;
+    offerForm.reset();
+
+    const activeStores = allMerchants.filter(m => !m.suspended);
+    if (activeStores.length === 0) {
+        showToast('No active stores available for offers.', 'error');
+        return;
+    }
+
+    storeSelect.innerHTML = activeStores
         .map(m => `<option value="${m.id}">${m.name}</option>`)
         .join('');
+
+    if (!storeSelect.value && storeSelect.options.length > 0) {
+        storeSelect.value = storeSelect.options[0].value;
+    }
 
     // Load services for first store
     updateOfferServices();
 
-    document.getElementById('offer-form').reset();
     document.getElementById('offer-modal').style.display = 'flex';
 };
 
@@ -2034,12 +2507,12 @@ function updateOfferServices() {
     const store = allMerchants.find(m => m.id === storeId);
     const serviceSelect = document.getElementById('offer-service');
 
-    if (store?.services) {
+    if (store?.services?.length) {
         serviceSelect.innerHTML = store.services.map((s, i) =>
             `<option value="${i}">${s.name} - ${s.price.toLocaleString()} IQD</option>`
         ).join('');
     } else {
-        serviceSelect.innerHTML = '<option>No services</option>';
+        serviceSelect.innerHTML = '<option value="">No services</option>';
     }
 }
 
@@ -2050,19 +2523,47 @@ document.getElementById('offer-form')?.addEventListener('submit', async (e) => {
 
     const storeId = document.getElementById('offer-store').value;
     const store = allMerchants.find(m => m.id === storeId);
-    const serviceIndex = parseInt(document.getElementById('offer-service').value);
+    const serviceIndex = parseInt(document.getElementById('offer-service').value, 10);
     const service = store?.services?.[serviceIndex];
 
-    const durationDays = parseInt(document.getElementById('offer-duration').value);
+    if (!store || !service) {
+        showToast('Please select a valid store and service.', 'error');
+        return;
+    }
+
+    const discountPercent = parseInt(document.getElementById('offer-discount').value, 10);
+    const durationDays = parseInt(document.getElementById('offer-duration').value, 10);
+    const validFromTime = normalizeOfferInputTime(document.getElementById('offer-start-time').value);
+    const validToTime = normalizeOfferInputTime(document.getElementById('offer-end-time').value);
+
+    if ((validFromTime && !validToTime) || (!validFromTime && validToTime)) {
+        showToast('Set both valid hours fields or leave both empty.', 'error');
+        return;
+    }
+    if (validFromTime && validToTime && validFromTime === validToTime) {
+        showToast('Offer start and end time cannot be the same.', 'error');
+        return;
+    }
+    if (!Number.isFinite(discountPercent) || discountPercent < 1 || discountPercent > 100) {
+        showToast('Discount must be between 1 and 100.', 'error');
+        return;
+    }
+    if (!Number.isFinite(durationDays) || durationDays < 1) {
+        showToast('Duration must be at least 1 day.', 'error');
+        return;
+    }
+
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + durationDays);
 
     // Use serviceName (not serviceIndex) so offers survive service reordering
     const offerData = {
         storeId,
-        storeName: store?.name,
-        serviceName: service?.name || 'Service',
-        discountPercent: parseInt(document.getElementById('offer-discount').value),
+        storeName: store.name,
+        serviceName: service.name,
+        discountPercent,
+        validFromTime: validFromTime || null,
+        validToTime: validToTime || null,
         startDate: Timestamp.now(),
         endDate: Timestamp.fromDate(endDate),
         active: true
@@ -2072,6 +2573,7 @@ document.getElementById('offer-form')?.addEventListener('submit', async (e) => {
         await addDoc(collection(db, "offers"), offerData);
         closeModal('offer-modal');
         loadAdminOffers();
+        showToast('Offer created successfully.', 'success');
     } catch (error) {
         console.error('Error creating offer:', error);
         showToast('Failed to create offer', 'error');
@@ -2198,6 +2700,100 @@ window.deleteSponsor = async function (id) {
         console.error('Error deleting sponsor:', error);
     }
 };
+
+// ========== ADMIN ORDERS FUNCTIONS ==========
+let currentAdminOrderFilter = 'all';
+
+window.filterAdminOrders = function (status) {
+    currentAdminOrderFilter = status;
+    const btns = document.querySelectorAll('#admin-orders .filter-btn');
+    btns.forEach(b => {
+        if (b.innerText.toLowerCase() === status || (status === 'all' && b.innerText === 'All')) {
+            b.classList.add('active');
+        } else {
+            b.classList.remove('active');
+        }
+    });
+    loadAdminOrders(status);
+};
+
+async function loadAdminOrders(status = 'all') {
+    const tbody = document.getElementById('admin-orders-tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="8">Loading...</td></tr>';
+
+    try {
+        const snapshot = await getDocs(collection(db, "orders"));
+        let orders = [];
+        snapshot.forEach(docSnap => {
+            orders.push({ id: docSnap.id, ...docSnap.data() });
+        });
+
+        orders.sort((a, b) => {
+            const dateA = toSafeDate(a.createdAt) || new Date(0);
+            const dateB = toSafeDate(b.createdAt) || new Date(0);
+            return dateB - dateA;
+        });
+
+        if (status !== 'all') {
+            orders = orders.filter(order => (order.status || '').toLowerCase() === status);
+        }
+
+        if (orders.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8">No orders found.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = orders.map(order => {
+            const createdAt = toSafeDate(order.createdAt);
+            const createdAtLabel = createdAt ? createdAt.toLocaleString() : 'N/A';
+            const statusValue = (order.status || 'pending').toLowerCase();
+            const items = Array.isArray(order.items) ? order.items : [];
+            const totalItems = Number(order.totalItems) || items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+            const previewItems = items.slice(0, 2).map(item => `${item.name || 'Item'} x${Number(item.quantity) || 1}`).join(', ');
+            const total = Number(order.subtotal ?? order.total ?? 0);
+
+            const actionButtons = statusValue === 'pending'
+                ? `
+                    <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'confirmed')">Confirm</button>
+                    <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                `
+                : statusValue === 'confirmed'
+                    ? `
+                        <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'fulfilled')">Fulfill</button>
+                        <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                    `
+                    : '<span style="color:#9ca3af; font-size:0.8rem;">No actions</span>';
+
+            return `
+                <tr>
+                    <td>#${order.id.slice(0, 8)}</td>
+                    <td>${order.storeName || 'Store'}</td>
+                    <td>
+                        <div>${order.customerName || 'Customer'}</div>
+                        <div style="font-size:0.78rem; color:#666;">${order.customerPhone || ''}</div>
+                    </td>
+                    <td>
+                        <div>${totalItems} item${totalItems === 1 ? '' : 's'}</div>
+                        <div style="font-size:0.78rem; color:#666;">${previewItems}${items.length > 2 ? ' ...' : ''}</div>
+                    </td>
+                    <td>${total.toLocaleString()} IQD</td>
+                    <td>${createdAtLabel}</td>
+                    <td>
+                        <span class="status-badge order-status-${statusValue}">
+                            ${statusValue.charAt(0).toUpperCase() + statusValue.slice(1)}
+                        </span>
+                    </td>
+                    <td>${actionButtons}</td>
+                </tr>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error('Error loading admin orders:', error);
+        tbody.innerHTML = '<tr><td colspan="8">Error loading orders.</td></tr>';
+    }
+}
 
 // ========== CUSTOMER SPONSOR BANNER ==========
 
@@ -2990,12 +3586,13 @@ window.printInvoice = function () {
 
 // Filter button handlers
 document.addEventListener('DOMContentLoaded', () => {
-    const filterBtns = document.querySelectorAll('.filter-btn');
+    const filterBtns = document.querySelectorAll('#admin-financials .financial-filters .filter-btn');
     filterBtns.forEach(btn => {
         btn.addEventListener('click', () => {
             filterBtns.forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            loadFinancials(btn.dataset.range);
+            const range = btn.dataset.range || currentFinancialFilter;
+            loadFinancials(range);
         });
     });
 });
@@ -3032,6 +3629,7 @@ window.loadOwnerDashboard = async function () {
 
             if (tab.dataset.tab === 'overview') loadOwnerOverview();
             if (tab.dataset.tab === 'bookings') loadOwnerBookings('all');
+            if (tab.dataset.tab === 'orders') loadOwnerOrders('all');
             if (tab.dataset.tab === 'calendar') loadOwnerCalendar();
             if (tab.dataset.tab === 'store') loadOwnerStore();
             if (tab.dataset.tab === 'financials') loadOwnerFinancials();
@@ -3115,6 +3713,7 @@ async function loadOwnerOverview() {
 
 // 2. Bookings Tab
 let currentBookingFilter = 'all';
+let currentOrderFilter = 'all';
 
 window.filterOwnerBookings = function (status) {
     currentBookingFilter = status;
@@ -3206,6 +3805,197 @@ async function loadOwnerBookings(status) {
         tbody.innerHTML = '<tr><td colspan="6">Error loading bookings. Check console.</td></tr>';
     }
 }
+
+// 2a. Shop Orders Tab
+window.filterOwnerOrders = function (status) {
+    currentOrderFilter = status;
+    const btns = document.querySelectorAll('#owner-orders .filter-btn');
+    btns.forEach(b => {
+        if (b.innerText.toLowerCase() === status || (status === 'all' && b.innerText === 'All')) {
+            b.classList.add('active');
+        } else {
+            b.classList.remove('active');
+        }
+    });
+    loadOwnerOrders(status);
+};
+
+function parseDateValue(value) {
+    if (!value) return null;
+    const dateValue = value?.toDate ? value.toDate() : new Date(value);
+    return isNaN(dateValue.getTime()) ? null : dateValue;
+}
+
+async function loadOwnerOrders(status = 'all') {
+    const tbody = document.getElementById('owner-orders-tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
+
+    if (!currentUser || !currentUser.storeId) {
+        tbody.innerHTML = '<tr><td colspan="7">No store linked to this account.</td></tr>';
+        return;
+    }
+
+    try {
+        const q = query(collection(db, "orders"), where("storeId", "==", currentUser.storeId));
+        const snapshot = await getDocs(q);
+        let orders = [];
+        snapshot.forEach(d => orders.push({ id: d.id, ...d.data() }));
+
+        orders.sort((a, b) => {
+            const dateA = parseDateValue(a.createdAt) || new Date(0);
+            const dateB = parseDateValue(b.createdAt) || new Date(0);
+            return dateB - dateA;
+        });
+
+        if (status !== 'all') {
+            orders = orders.filter(o => (o.status || '').toLowerCase() === status);
+        }
+
+        if (orders.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7">No orders found.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = orders.map(order => {
+            const createdAt = parseDateValue(order.createdAt);
+            const createdAtLabel = createdAt ? createdAt.toLocaleString() : 'N/A';
+            const statusValue = (order.status || 'pending').toLowerCase();
+            const items = Array.isArray(order.items) ? order.items : [];
+            const totalItems = Number(order.totalItems) || items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+            const itemPreview = items.slice(0, 2).map(item => `${item.name || 'Item'} x${Number(item.quantity) || 1}`).join(', ');
+            const itemsLabel = items.length > 0
+                ? `<div>${totalItems} item${totalItems === 1 ? '' : 's'}</div><div style="font-size:0.78rem; color:#666;">${itemPreview}${items.length > 2 ? ' ...' : ''}</div>`
+                : '<span style="color:#888;">No items</span>';
+            const total = Number(order.subtotal ?? order.total ?? 0);
+
+            const actionButtons = statusValue === 'pending'
+                ? `
+                    <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'confirmed')">Confirm</button>
+                    <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                `
+                : statusValue === 'confirmed'
+                    ? `
+                        <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'fulfilled')">Fulfill</button>
+                        <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                    `
+                    : '<span style="color:#9ca3af; font-size:0.8rem;">No actions</span>';
+
+            return `
+                <tr>
+                    <td>#${order.id.slice(0, 8)}</td>
+                    <td>
+                        <div>${order.customerName || 'Customer'}</div>
+                        <div style="font-size:0.78rem; color:#666;">${order.customerPhone || ''}</div>
+                    </td>
+                    <td>${itemsLabel}</td>
+                    <td>${total.toLocaleString()} IQD</td>
+                    <td>${createdAtLabel}</td>
+                    <td>
+                        <span class="status-badge order-status-${statusValue}">
+                            ${statusValue.charAt(0).toUpperCase() + statusValue.slice(1)}
+                        </span>
+                    </td>
+                    <td>${actionButtons}</td>
+                </tr>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error("Error loading owner orders:", error);
+        tbody.innerHTML = '<tr><td colspan="7">Error loading orders.</td></tr>';
+    }
+}
+
+async function restockCancelledOrderItems(orderData) {
+    const storeId = orderData.storeId;
+    const items = Array.isArray(orderData.items) ? orderData.items : [];
+    if (!storeId || items.length === 0) return;
+
+    const storeRef = doc(db, "merchants", storeId);
+    const storeSnap = await getDoc(storeRef);
+    if (!storeSnap.exists()) return;
+
+    const storeData = storeSnap.data();
+    const products = Array.isArray(storeData.products) ? [...storeData.products] : [];
+    let hasStockChanges = false;
+
+    items.forEach(item => {
+        const itemName = (item.name || '').trim().toLowerCase();
+        const quantity = Math.max(0, Number(item.quantity) || 0);
+        if (!itemName || quantity <= 0) return;
+
+        const productIndex = products.findIndex(p => (p.name || '').trim().toLowerCase() === itemName);
+        if (productIndex === -1) return;
+
+        const currentStock = Math.max(0, Number(products[productIndex].stock) || 0);
+        products[productIndex] = {
+            ...products[productIndex],
+            stock: currentStock + quantity
+        };
+        hasStockChanges = true;
+    });
+
+    if (!hasStockChanges) return;
+
+    await updateDoc(storeRef, { products });
+
+    const merchantIndex = allMerchants.findIndex(m => m.id === storeId);
+    if (merchantIndex >= 0) {
+        allMerchants[merchantIndex] = { ...allMerchants[merchantIndex], products };
+    }
+}
+
+window.updateShopOrderStatus = async function (orderId, newStatus) {
+    const confirmMessages = {
+        confirmed: 'Confirm this order?',
+        fulfilled: 'Mark this order as fulfilled?',
+        cancelled: 'Cancel this order? Stock will be restored.'
+    };
+    if (!await showConfirm(confirmMessages[newStatus] || 'Update order status?')) return;
+
+    try {
+        const orderRef = doc(db, "orders", orderId);
+        const orderSnap = await getDoc(orderRef);
+        if (!orderSnap.exists()) {
+            showToast('Order not found.', 'error');
+            return;
+        }
+
+        const orderData = orderSnap.data();
+        if (currentUser.role === 'owner' && orderData.storeId !== currentUser.storeId) {
+            showToast('You can only manage orders for your own store.', 'error');
+            return;
+        }
+
+        const previousStatus = (orderData.status || 'pending').toLowerCase();
+        if (previousStatus === newStatus) {
+            showToast('Order is already in this status.', 'info');
+            return;
+        }
+
+        await updateDoc(orderRef, {
+            status: newStatus,
+            updatedAt: new Date().toISOString(),
+            updatedBy: currentUser.id || currentUser.phone || 'owner'
+        });
+
+        if (newStatus === 'cancelled' && previousStatus !== 'cancelled') {
+            await restockCancelledOrderItems(orderData);
+        }
+
+        showToast(`Order updated to ${newStatus}.`, 'success');
+        if (currentUser.role === 'owner') {
+            loadOwnerOrders(currentOrderFilter);
+        }
+        if (currentUser.role === 'admin') {
+            loadAdminOrders(currentAdminOrderFilter);
+        }
+    } catch (error) {
+        console.error('Error updating shop order:', error);
+        showToast('Failed to update order status.', 'error');
+    }
+};
 
 // Update Booking Status (Confirm/Reject/Complete)
 window.updateBookingStatus = async function (bookingId, newStatus) {
@@ -3538,19 +4328,30 @@ async function loadOwnerStore() {
     document.getElementById('owner-store-name').value = store.name;
     document.getElementById('owner-store-address').value = store.address || '';
     document.getElementById('owner-store-workers').value = store.workerCount || 1;
+    document.getElementById('owner-cancellation-policy').value = store.cancellationPolicy || '';
     document.getElementById('owner-store-lat').value = store.lat || '';
     document.getElementById('owner-store-lng').value = store.lng || '';
 
     // Services
     renderOwnerServices(store.services || []);
+    
+    // Staff
+    if(window.renderOwnerStaff) {
+        renderOwnerStaff(store.staff || []);
+    }
+
+    // Products
+    if (window.renderOwnerProducts) {
+        renderOwnerProducts(store.products || []);
+    }
 }
 
 function renderOwnerServices(services) {
     const list = document.getElementById('owner-services-list');
     list.innerHTML = services.map((s, i) => `
          <div class="sortable-item">
-            <div class="service-info">
-                <div class="service-name">${s.name}</div>
+             <div class="service-info">
+                <div class="service-name">${s.name} ${s.category ? `<span style="font-size: 0.75rem; background: #eee; padding: 2px 6px; border-radius: 4px; margin-left: 8px;">${s.category}</span>` : ''}</div>
                 <div class="service-meta">${s.duration} mins • ${s.price.toLocaleString()} IQD</div>
             </div>
              <div class="service-actions">
@@ -3734,11 +4535,13 @@ window.saveOwnerStoreDetails = async function () {
         const name = nameEle.value;
         const address = addressEle ? addressEle.value : '';
         const workerCount = Math.max(1, parseInt(workersEle.value) || 1);
+        const cancellationPolicy = document.getElementById('owner-cancellation-policy')?.value || '';
         
         let updateData = {
             name: name,
             address: address,
-            workerCount: workerCount
+            workerCount: workerCount,
+            cancellationPolicy: cancellationPolicy
         };
 
         if (latEle && lngEle) {
@@ -3787,6 +4590,7 @@ window.openAddServiceModalForOwner = function () {
     document.getElementById('service-modal-title').innerText = 'Add New Service';
     document.getElementById('service-edit-index').value = -1; // New
     document.getElementById('service-edit-name').value = '';
+    document.getElementById('service-edit-category').value = '';
     document.getElementById('service-edit-price').value = '';
     document.getElementById('service-edit-duration').value = '';
 
@@ -3805,6 +4609,7 @@ window.editOwnerService = function (index) {
     document.getElementById('service-modal-title').innerText = 'Edit Service';
     document.getElementById('service-edit-index').value = index;
     document.getElementById('service-edit-name').value = service.name;
+    document.getElementById('service-edit-category').value = service.category || '';
     document.getElementById('service-edit-price').value = service.price;
     document.getElementById('service-edit-duration').value = service.duration;
 
@@ -3831,6 +4636,7 @@ window.deleteOwnerService = async function (index) {
 async function saveOwnerService(e) {
     e.preventDefault();
     const name = document.getElementById('service-edit-name').value;
+    const category = document.getElementById('service-edit-category').value;
     const price = parseInt(document.getElementById('service-edit-price').value);
     const duration = parseInt(document.getElementById('service-edit-duration').value);
     const index = parseInt(document.getElementById('service-edit-index').value);
@@ -3838,7 +4644,7 @@ async function saveOwnerService(e) {
     const store = allMerchants.find(m => m.id === currentUser.storeId);
     if (!store.services) store.services = [];
 
-    const newService = { name, price, duration };
+    const newService = { name, category, price, duration };
 
     if (index === -1) {
         store.services.push(newService);
@@ -3849,10 +4655,226 @@ async function saveOwnerService(e) {
     try {
         await updateDoc(doc(db, "merchants", currentUser.storeId), { services: store.services });
         renderOwnerServices(store.services);
+        document.getElementById('service-edit-category').value = '';
         closeModal('service-modal');
     } catch (e) {
         console.error(e);
         showToast('Error saving service', 'error');
+    }
+}
+
+// ========== STAFF MEMBERS (OWNER) ==========
+window.renderOwnerStaff = function (staffArray) {
+    const list = document.getElementById('owner-staff-list');
+    if (!list) return;
+    
+    list.innerHTML = staffArray.map((st, i) => `
+         <div class="sortable-item">
+            ${st.image ? `<img src="${st.image}" style="width:40px; height:40px; border-radius:50%; object-fit:cover; margin-right:10px;">` : `<div style="width:40px; height:40px; border-radius:50%; background:#e2e8f0; display:flex; align-items:center; justify-content:center; margin-right:10px; font-weight:bold; color:#64748b;">${st.name.charAt(0)}</div>`}
+             <div class="service-info">
+                <div class="service-name">${st.name}</div>
+                <div class="service-meta" style="color:var(--primary); font-weight:500;">${st.role || 'Staff Member'}</div>
+            </div>
+             <div class="service-actions">
+                <button type="button" class="service-action-btn edit" onclick="editOwnerStaff(${i})">️</button>
+                <button type="button" class="service-action-btn delete" onclick="deleteOwnerStaff(${i})">️</button>
+            </div>
+        </div>
+    `).join('');
+};
+
+window.openAddStaffModalForOwner = function () {
+    document.getElementById('staff-modal-title').textContent = 'Add New Staff Member';
+    document.getElementById('staff-edit-index').value = '-1';
+    document.getElementById('staff-form').reset();
+
+    const form = document.getElementById('staff-form');
+    form.onsubmit = saveOwnerStaff;
+
+    document.getElementById('staff-modal').style.display = 'flex';
+};
+
+window.editOwnerStaff = function (index) {
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    const st = store.staff[index];
+
+    document.getElementById('staff-modal-title').textContent = 'Edit Staff Member';
+    document.getElementById('staff-edit-index').value = index;
+    document.getElementById('staff-edit-name').value = st.name;
+    document.getElementById('staff-edit-role').value = st.role || '';
+    document.getElementById('staff-edit-image').value = st.image || '';
+
+    const form = document.getElementById('staff-form');
+    form.onsubmit = saveOwnerStaff;
+
+    document.getElementById('staff-modal').style.display = 'flex';
+};
+
+window.deleteOwnerStaff = async function (index) {
+    if (!await showConfirm('Are you sure you want to delete this staff member?')) return;
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    store.staff.splice(index, 1);
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { staff: store.staff });
+        renderOwnerStaff(store.staff);
+    } catch (e) {
+        showToast('Error deleting staff member', 'error');
+    }
+};
+
+async function saveOwnerStaff(e) {
+    e.preventDefault();
+    const name = document.getElementById('staff-edit-name').value.trim();
+    const role = document.getElementById('staff-edit-role').value.trim();
+    const image = document.getElementById('staff-edit-image').value.trim();
+    const index = parseInt(document.getElementById('staff-edit-index').value);
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store.staff) store.staff = [];
+
+    const newStaff = { name, role, image };
+
+    if (index === -1) {
+        store.staff.push(newStaff);
+    } else {
+        store.staff[index] = newStaff;
+    }
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { staff: store.staff });
+        renderOwnerStaff(store.staff);
+        closeModal('staff-modal');
+    } catch (e) {
+        console.error(e);
+        showToast('Error saving staff member', 'error');
+    }
+}
+
+// ========== PRODUCTS (OWNER SHOP) ==========
+window.renderOwnerProducts = function (productsArray) {
+    const list = document.getElementById('owner-products-list');
+    if (!list) return;
+
+    if (!productsArray || productsArray.length === 0) {
+        list.innerHTML = `
+            <div class="empty-state" style="padding: 18px; font-size: 0.9rem;">
+                No products yet. Add your first product to start selling in the Shop tab.
+            </div>
+        `;
+        return;
+    }
+
+    list.innerHTML = productsArray.map((p, i) => {
+        const price = Number(p.price) || 0;
+        const stock = Number(p.stock) || 0;
+        const image = p.image || '';
+        return `
+            <div class="sortable-item">
+                ${image
+                    ? `<img src="${image}" alt="${p.name}" style="width:40px; height:40px; border-radius:8px; object-fit:cover; margin-right:10px;">`
+                    : `<div style="width:40px; height:40px; border-radius:8px; background:#f3f4f6; display:flex; align-items:center; justify-content:center; margin-right:10px; color:#9ca3af; font-size:0.85rem;">IMG</div>`
+                }
+                <div class="service-info">
+                    <div class="service-name">${p.name}</div>
+                    <div class="service-meta">${price.toLocaleString()} IQD • Stock: ${stock}</div>
+                </div>
+                <div class="service-actions">
+                    <button type="button" class="service-action-btn edit" onclick="editOwnerProduct(${i})">️</button>
+                    <button type="button" class="service-action-btn delete" onclick="deleteOwnerProduct(${i})">️</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+};
+
+window.openAddProductModalForOwner = function () {
+    const form = document.getElementById('product-form');
+    if (!form) return;
+    document.getElementById('product-modal-title').textContent = 'Add Product';
+    document.getElementById('product-edit-index').value = '-1';
+    form.reset();
+    form.onsubmit = saveOwnerProduct;
+    document.getElementById('product-modal').style.display = 'flex';
+};
+
+window.editOwnerProduct = function (index) {
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store?.products?.[index]) return;
+    const product = store.products[index];
+
+    document.getElementById('product-modal-title').textContent = 'Edit Product';
+    document.getElementById('product-edit-index').value = String(index);
+    document.getElementById('product-edit-name').value = product.name || '';
+    document.getElementById('product-edit-price').value = Number(product.price) || 0;
+    document.getElementById('product-edit-stock').value = Number(product.stock) || 0;
+    document.getElementById('product-edit-image').value = product.image || '';
+
+    const form = document.getElementById('product-form');
+    form.onsubmit = saveOwnerProduct;
+    document.getElementById('product-modal').style.display = 'flex';
+};
+
+window.deleteOwnerProduct = async function (index) {
+    if (!await showConfirm('Delete this product from your shop?')) return;
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store) return;
+    if (!Array.isArray(store.products)) store.products = [];
+    store.products.splice(index, 1);
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { products: store.products });
+        renderOwnerProducts(store.products);
+        showToast('Product removed.', 'success');
+    } catch (e) {
+        console.error('Delete product error:', e);
+        showToast('Error deleting product', 'error');
+    }
+};
+
+async function saveOwnerProduct(e) {
+    e.preventDefault();
+
+    const name = document.getElementById('product-edit-name').value.trim();
+    const price = parseInt(document.getElementById('product-edit-price').value, 10);
+    const stock = parseInt(document.getElementById('product-edit-stock').value, 10);
+    const image = document.getElementById('product-edit-image').value.trim();
+    const index = parseInt(document.getElementById('product-edit-index').value, 10);
+
+    if (!name) {
+        showToast('Product name is required.', 'error');
+        return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+        showToast('Product price must be 0 or higher.', 'error');
+        return;
+    }
+    if (!Number.isFinite(stock) || stock < 0) {
+        showToast('Product stock must be 0 or higher.', 'error');
+        return;
+    }
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store) return;
+    if (!Array.isArray(store.products)) store.products = [];
+
+    const newProduct = { name, price, stock, image };
+    if (index === -1) {
+        store.products.push(newProduct);
+    } else {
+        store.products[index] = newProduct;
+    }
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { products: store.products });
+        renderOwnerProducts(store.products);
+        closeModal('product-modal');
+        showToast('Product saved successfully.', 'success');
+    } catch (e) {
+        console.error('Save product error:', e);
+        showToast('Error saving product', 'error');
     }
 }
 
@@ -4201,6 +5223,7 @@ async function loadCustomerHistory() {
         listContainer.innerHTML = '';
         snapshot.forEach(docSnap => {
             const b = docSnap.data();
+            const bookingId = docSnap.id;
             const dateObj = typeof b.bookingDate === 'string' ? new Date(b.bookingDate) : b.bookingDate.toDate();
             
             // Format status colors correctly
@@ -4210,6 +5233,17 @@ async function loadCustomerHistory() {
             if (b.status === 'completed') { bgColor = '#d1fae5'; textColor = '#059669'; }
             if (b.status === 'cancelled' || b.status === 'canceled') { bgColor = '#fee2e2'; textColor = '#dc2626'; }
             if (b.status === 'pending') { bgColor = '#fef3c7'; textColor = '#d97706'; }
+            
+            // Check if already reviewed
+            const existingReview = allReviews.find(r => r.bookingId === bookingId);
+            let reviewBtnHTML = '';
+            if (b.status === 'completed') {
+                if (existingReview) {
+                    reviewBtnHTML = `<span class="btn-reviewed">✓ Reviewed (${existingReview.rating}★)</span>`;
+                } else {
+                    reviewBtnHTML = `<button class="btn-leave-review" onclick="event.stopPropagation(); openReviewModal('${bookingId}', '${b.storeId}', '${(b.storeName || '').replace(/'/g, "\\'")}')">★ Leave a Review</button>`;
+                }
+            }
             
             const card = document.createElement('div');
             card.style.cssText = 'background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 8px;';
@@ -4229,6 +5263,7 @@ async function loadCustomerHistory() {
                         ${dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                     </span>
                 </div>
+                ${reviewBtnHTML ? `<div style="margin-top: 10px; display: flex; justify-content: flex-end;">${reviewBtnHTML}</div>` : ''}
             `;
             listContainer.appendChild(card);
         });
@@ -4237,4 +5272,1051 @@ async function loadCustomerHistory() {
         console.error("Error fetching history:", error);
         listContainer.innerHTML = '<p style="color: red;">Failed to load history.</p>';
     }
+}
+
+
+// ========== RATINGS & REVIEWS SYSTEM ==========
+
+let pendingReview = { bookingId: null, storeId: null, storeName: '', rating: 0 };
+
+window.setReviewRating = function(value) {
+    pendingReview.rating = value;
+    const stars = document.querySelectorAll('#star-picker .star');
+    stars.forEach((star, i) => {
+        star.classList.toggle('active', i < value);
+    });
+    const labels = ['', 'Poor', 'Fair', 'Good', 'Very Good', 'Excellent'];
+    document.getElementById('rating-label').textContent = labels[value] || '';
+};
+
+window.openReviewModal = function(bookingId, storeId, storeName) {
+    pendingReview = { bookingId, storeId, storeName, rating: 0 };
+    
+    // Reset UI
+    document.getElementById('review-store-name').textContent = `How was your visit to ${storeName}?`;
+    document.getElementById('review-comment').value = '';
+    document.getElementById('rating-label').textContent = 'Tap a star to rate';
+    document.querySelectorAll('#star-picker .star').forEach(s => s.classList.remove('active'));
+    
+    document.getElementById('review-modal').style.display = 'flex';
+};
+
+window.submitReview = async function() {
+    if (pendingReview.rating === 0) {
+        showToast('Please select a star rating', 'error');
+        return;
+    }
+    
+    const btn = document.getElementById('btn-submit-review');
+    btn.disabled = true;
+    btn.textContent = 'Submitting...';
+    
+    try {
+        const reviewData = {
+            bookingId: pendingReview.bookingId,
+            storeId: pendingReview.storeId,
+            storeName: pendingReview.storeName,
+            customerId: currentUser.phone,
+            customerName: currentUser.name || 'Anonymous',
+            rating: pendingReview.rating,
+            comment: document.getElementById('review-comment').value.trim(),
+            createdAt: Timestamp.now()
+        };
+        
+        await addDoc(collection(db, 'reviews'), reviewData);
+        
+        // Update local cache
+        allReviews.push(reviewData);
+        
+        // Refresh UI
+        renderMerchants();
+        
+        closeModal('review-modal');
+        showToast('Thank you for your review! ⭐', 'success');
+        
+        // Refresh visit history to show "Reviewed" badge
+        loadCustomerHistory();
+        
+    } catch (error) {
+        console.error('Error submitting review:', error);
+        showToast('Failed to submit review. Please try again.', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Submit Review';
+    }
+};
+
+
+
+// ========== ENHANCED SEARCH ==========
+
+let isSearchActive = false;
+let discoveryMapInstance = null;
+let discoveryMarkers = [];
+let discoveryMapVisible = false;
+
+window.toggleInlineMap = function () {
+    discoveryMapVisible = !discoveryMapVisible;
+    const panel = document.getElementById('discovery-map-panel');
+    const layout = document.getElementById('discovery-layout');
+    const btn = document.getElementById('map-toggle-btn');
+
+    if (discoveryMapVisible) {
+        panel.style.display = 'block';
+        layout.classList.add('map-active');
+        btn.classList.add('active');
+        btn.textContent = '✕ Hide Map';
+        // Initialize map if first time
+        if (!discoveryMapInstance && typeof google !== 'undefined') {
+            discoveryMapInstance = new google.maps.Map(document.getElementById('discovery-map'), {
+                center: { lat: 36.191, lng: 44.009 }, // Erbil default
+                zoom: 13,
+                styles: [
+                    { featureType: "poi", stylers: [{ visibility: "off" }] },
+                    { featureType: "transit", stylers: [{ visibility: "off" }] }
+                ],
+                mapTypeControl: false,
+                streetViewControl: false,
+                fullscreenControl: false
+            });
+        }
+        updateDiscoveryMapMarkers();
+    } else {
+        panel.style.display = 'none';
+        layout.classList.remove('map-active');
+        btn.classList.remove('active');
+        btn.textContent = '🗺️ Map';
+    }
+};
+
+function updateDiscoveryMapMarkers(filteredMerchants) {
+    if (!discoveryMapInstance) return;
+    
+    // Clear existing markers
+    discoveryMarkers.forEach(m => m.setMap(null));
+    discoveryMarkers = [];
+
+    const merchants = filteredMerchants || allMerchants;
+    const bounds = new google.maps.LatLngBounds();
+    let hasValidCoords = false;
+
+    merchants.forEach(merchant => {
+        if (!merchant.lat || !merchant.lng) return;
+        hasValidCoords = true;
+        const pos = { lat: parseFloat(merchant.lat), lng: parseFloat(merchant.lng) };
+        bounds.extend(pos);
+
+        const marker = new google.maps.Marker({
+            position: pos,
+            map: discoveryMapInstance,
+            title: merchant.name,
+            icon: {
+                path: google.maps.SymbolPath.CIRCLE,
+                fillColor: '#C19A6B',
+                fillOpacity: 1,
+                strokeColor: '#fff',
+                strokeWeight: 2,
+                scale: 8
+            }
+        });
+
+        const infoWindow = new google.maps.InfoWindow({
+            content: `<div style="padding:4px 8px;"><strong>${merchant.name}</strong><br><span style="color:#666;font-size:0.85rem;">${merchant.address || ''}</span><br><a href="#" onclick="event.preventDefault(); openMerchantDetails('${merchant.id}')" style="color:#C19A6B; font-weight:500;">View Profile →</a></div>`
+        });
+        marker.addListener('click', () => {
+            discoveryMarkers.forEach(m => m.infoWindow?.close());
+            infoWindow.open(discoveryMapInstance, marker);
+        });
+        marker.infoWindow = infoWindow;
+        marker.merchantId = merchant.id;
+        discoveryMarkers.push(marker);
+    });
+
+    if (hasValidCoords) {
+        discoveryMapInstance.fitBounds(bounds);
+        if (merchants.length === 1) {
+            discoveryMapInstance.setZoom(15);
+        }
+    }
+}
+
+window.performSearch = function() {
+    const treatmentQuery = (document.getElementById('search-treatment')?.value || '').trim().toLowerCase();
+    const categoryFilter = document.getElementById('search-category')?.value || 'all';
+    const sortBy = document.getElementById('search-sort')?.value || 'default';
+    
+    // Check if any filter is active
+    isSearchActive = treatmentQuery !== '' || categoryFilter !== 'all' || sortBy !== 'default';
+    
+    let filtered = [...allMerchants];
+    
+    // Filter by treatment name (search through services)
+    if (treatmentQuery) {
+        filtered = filtered.filter(m => {
+            const services = m.services || [];
+            const nameMatch = m.name.toLowerCase().includes(treatmentQuery);
+            const serviceMatch = services.some(s => s.name.toLowerCase().includes(treatmentQuery));
+            return nameMatch || serviceMatch;
+        });
+    }
+    
+    // Filter by category
+    if (categoryFilter !== 'all') {
+        filtered = filtered.filter(m => m.category === categoryFilter);
+    }
+    
+    // Also apply the current type filter (All / Salons / Beauty Centers chips)
+    if (currentFilter !== 'all') {
+        filtered = filtered.filter(m => m.type === currentFilter);
+    }
+    
+    // Sort
+    if (sortBy === 'rating') {
+        filtered.sort((a, b) => {
+            const rA = getStoreRating(a.id);
+            const rB = getStoreRating(b.id);
+            return parseFloat(rB.avg) - parseFloat(rA.avg);
+        });
+    } else if (sortBy === 'reviews') {
+        filtered.sort((a, b) => {
+            const rA = getStoreRating(a.id);
+            const rB = getStoreRating(b.id);
+            return rB.count - rA.count;
+        });
+    } else if (sortBy === 'nearest') {
+        filtered.sort((a, b) => {
+            const distA = parseFloat(a.distance) || 999;
+            const distB = parseFloat(b.distance) || 999;
+            return distA - distB;
+        });
+    }
+    
+    // Show search results info
+    const infoBar = document.getElementById('search-results-info');
+    const countEl = document.getElementById('search-results-count');
+    
+    if (isSearchActive) {
+        infoBar.style.display = 'flex';
+        let label = `${filtered.length} venue${filtered.length !== 1 ? 's' : ''} found`;
+        if (treatmentQuery) label += ` for "${treatmentQuery}"`;
+        if (categoryFilter !== 'all') label += ` in ${categoryFilter}`;
+        countEl.textContent = label;
+        // Show map toggle button
+        const mapToggleBtn = document.getElementById('map-toggle-btn');
+        if (mapToggleBtn) mapToggleBtn.style.display = 'inline-block';
+    } else {
+        infoBar.style.display = 'none';
+        // Hide map toggle and collapse map when clearing search
+        const mapToggleBtn = document.getElementById('map-toggle-btn');
+        if (mapToggleBtn) mapToggleBtn.style.display = 'none';
+        if (discoveryMapVisible) {
+            discoveryMapVisible = false;
+            const panel = document.getElementById('discovery-map-panel');
+            const layout = document.getElementById('discovery-layout');
+            if (panel) panel.style.display = 'none';
+            if (layout) layout.classList.remove('map-active');
+        }
+    }
+    
+    // Update map markers if map is visible
+    if (discoveryMapVisible) {
+        updateDiscoveryMapMarkers(filtered);
+    }
+    
+    // Render filtered results
+    if (filtered.length === 0) {
+        if (merchantsGrid) merchantsGrid.innerHTML = '<div class="empty-state">No venues match your search. Try different keywords.</div>';
+        return;
+    }
+    
+    if (merchantsGrid) merchantsGrid.innerHTML = filtered.map(merchant => {
+        const imageContent = merchant.photoUrl
+            ? `<img src="${merchant.photoUrl}" alt="${merchant.name}" onerror="this.outerHTML='<span class=\\'emoji-fallback\\'>${merchant.image || ''}</span>'">`
+            : `<span class="emoji-fallback">${merchant.image || ''}</span>`;
+        
+        const now = new Date();
+        const merchantOffers = getActiveMerchantOffers(merchant.id, now);
+        const hasDiscount = merchantOffers.length > 0;
+        const maxDiscount = hasDiscount ? Math.max(...merchantOffers.map(o => o.discountPercent)) : 0;
+        
+        const rating = getStoreRating(merchant.id);
+        const ratingHTML = rating.count > 0
+            ? `<div class="card-rating">
+                    <span class="stars">${generateStarHTML(parseFloat(rating.avg))}</span>
+                    <span class="rating-score">${rating.avg}</span>
+                    <span class="rating-count">(${rating.count})</span>
+               </div>`
+            : `<div class="card-rating"><span class="rating-count" style="color:#9ca3af;">No reviews yet</span></div>`;
+        
+        return `
+        <div class="merchant-card" onclick="openMerchantDetails('${merchant.id}')">
+            <div class="card-img-top">
+                ${imageContent}
+                ${hasDiscount ? `<div class="discount-badge"> Up to ${maxDiscount}% OFF</div>` : ''}
+            </div>
+            <div class="card-body">
+                <span class="card-tag">${merchant.category}</span>
+                <h3 class="card-title">${merchant.name}</h3>
+                ${ratingHTML}
+                <div class="card-meta">
+                    <span>${merchant.distance}</span>
+                </div>
+                <p style="color: #6b7280; font-size: 0.9rem;">${merchant.address}</p>
+                ${merchant.lat && merchant.lng ? `<span class="btn-map-link" onclick="event.stopPropagation(); showOnMap('${merchant.id}')"> View on Map</span>` : ''}
+            </div>
+        </div>
+    `}).join('');
+};
+
+window.clearSearch = function() {
+    document.getElementById('search-treatment').value = '';
+    document.getElementById('search-category').value = 'all';
+    document.getElementById('search-sort').value = 'default';
+    document.getElementById('search-results-info').style.display = 'none';
+    isSearchActive = false;
+    
+    // Collapse discovery map
+    discoveryMapVisible = false;
+    const panel = document.getElementById('discovery-map-panel');
+    const layout = document.getElementById('discovery-layout');
+    const btn = document.getElementById('map-toggle-btn');
+    if (panel) panel.style.display = 'none';
+    if (layout) layout.classList.remove('map-active');
+    if (btn) { btn.style.display = 'none'; btn.classList.remove('active'); btn.textContent = '🗺️ Map'; }
+    
+    renderMerchants();
+};
+
+
+// ========== VENUE PROFILE PAGE ==========
+
+let currentVenueProfileMerchantId = null;
+const venueProfileState = {
+    activeTabByMerchant: {},
+    cartByMerchant: {}
+};
+
+function getVenueCartItems(merchantId) {
+    if (!venueProfileState.cartByMerchant[merchantId]) {
+        venueProfileState.cartByMerchant[merchantId] = [];
+    }
+    return venueProfileState.cartByMerchant[merchantId];
+}
+
+function syncVenueCartWithProducts(merchantId, products) {
+    const productList = Array.isArray(products) ? products : [];
+    const cartItems = getVenueCartItems(merchantId);
+
+    const synced = cartItems
+        .filter(item => productList[item.productIndex])
+        .map(item => {
+            const stock = Math.max(0, Number(productList[item.productIndex].stock) || 0);
+            const quantity = stock > 0 ? Math.max(1, Math.min(item.quantity, stock)) : 0;
+            return { ...item, quantity };
+        })
+        .filter(item => item.quantity > 0);
+
+    venueProfileState.cartByMerchant[merchantId] = synced;
+    return synced;
+}
+
+function calculateVenueCartTotals(cartItems, products) {
+    const productList = Array.isArray(products) ? products : [];
+    return cartItems.reduce((acc, item) => {
+        const product = productList[item.productIndex];
+        if (!product) return acc;
+        const price = Math.max(0, Number(product.price) || 0);
+        const quantity = Math.max(1, Number(item.quantity) || 1);
+        acc.totalItems += quantity;
+        acc.subtotal += price * quantity;
+        return acc;
+    }, { totalItems: 0, subtotal: 0 });
+}
+
+window.openMerchantDetails = function (id, preselectedServiceJson = null) {
+    const merchant = allMerchants.find(m => m.id === id);
+    if (!merchant) return;
+
+    // If a service was pre-selected (from search), go directly to booking
+    if (preselectedServiceJson) {
+        openBookingFromProfile(id, preselectedServiceJson);
+        return;
+    }
+
+    if (!venueProfileState.activeTabByMerchant[id]) {
+        venueProfileState.activeTabByMerchant[id] = 'services';
+    }
+    getVenueCartItems(id);
+
+    // Otherwise, show the venue profile page
+    renderVenueProfile(merchant);
+};
+
+window.switchVenueTab = function (tabName) {
+    if (!currentVenueProfileMerchantId) return;
+    const merchant = allMerchants.find(m => m.id === currentVenueProfileMerchantId);
+    if (!merchant) return;
+    venueProfileState.activeTabByMerchant[currentVenueProfileMerchantId] = tabName;
+    renderVenueProfile(merchant);
+};
+
+window.addProductToCart = function (merchantId, productIndex) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    const products = merchant?.products || [];
+    const product = products[productIndex];
+    if (!merchant || !product) return;
+
+    const stock = Math.max(0, Number(product.stock) || 0);
+    if (stock <= 0) {
+        showToast('This product is out of stock.', 'error');
+        return;
+    }
+
+    const cartItems = getVenueCartItems(merchantId);
+    const existing = cartItems.find(item => item.productIndex === productIndex);
+    if (existing) {
+        if (existing.quantity >= stock) {
+            showToast(`Only ${stock} left in stock.`, 'error');
+            return;
+        }
+        existing.quantity += 1;
+    } else {
+        cartItems.push({ productIndex, quantity: 1 });
+    }
+
+    venueProfileState.activeTabByMerchant[merchantId] = 'shop';
+    showToast('Product added to cart.', 'success');
+    renderVenueProfile(merchant);
+};
+
+window.changeShopCartQuantity = function (merchantId, productIndex, delta) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    const products = merchant?.products || [];
+    const product = products[productIndex];
+    if (!merchant || !product) return;
+
+    const cartItems = getVenueCartItems(merchantId);
+    const item = cartItems.find(entry => entry.productIndex === productIndex);
+    if (!item) return;
+
+    const stock = Math.max(0, Number(product.stock) || 0);
+    if (delta > 0 && item.quantity >= stock) {
+        showToast(`Only ${stock} left in stock.`, 'error');
+        return;
+    }
+
+    item.quantity += delta;
+    if (item.quantity <= 0) {
+        venueProfileState.cartByMerchant[merchantId] = cartItems.filter(entry => entry.productIndex !== productIndex);
+    }
+
+    renderVenueProfile(merchant);
+};
+
+window.removeFromShopCart = function (merchantId, productIndex) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+    const cartItems = getVenueCartItems(merchantId);
+    venueProfileState.cartByMerchant[merchantId] = cartItems.filter(entry => entry.productIndex !== productIndex);
+    renderVenueProfile(merchant);
+};
+
+window.checkoutShopCart = async function (merchantId) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+
+    if (!currentUser) {
+        showToast("Please login first.", 'error');
+        authModal.style.display = 'flex';
+        return;
+    }
+
+    const products = merchant.products || [];
+    const cartItems = syncVenueCartWithProducts(merchantId, products);
+    if (!cartItems.length) {
+        showToast('Your cart is empty.', 'error');
+        return;
+    }
+
+    const orderItems = [];
+    for (const item of cartItems) {
+        const product = products[item.productIndex];
+        if (!product) continue;
+        const stock = Math.max(0, Number(product.stock) || 0);
+        if (item.quantity > stock) {
+            showToast(`${product.name}: only ${stock} left in stock.`, 'error');
+            return;
+        }
+
+        const unitPrice = Math.max(0, Number(product.price) || 0);
+        const quantity = Math.max(1, Number(item.quantity) || 1);
+        orderItems.push({
+            productIndex: item.productIndex,
+            name: product.name || 'Product',
+            image: product.image || '',
+            unitPrice,
+            quantity,
+            lineTotal: unitPrice * quantity
+        });
+    }
+
+    if (orderItems.length === 0) {
+        showToast('Your cart is empty.', 'error');
+        return;
+    }
+
+    const totalItems = orderItems.reduce((sum, item) => sum + item.quantity, 0);
+    const subtotal = orderItems.reduce((sum, item) => sum + item.lineTotal, 0);
+
+    if (!await showConfirm(`Confirm order for ${subtotal.toLocaleString()} IQD?`)) return;
+
+    try {
+        const merchantRef = doc(db, "merchants", merchantId);
+        const orderRef = doc(collection(db, 'orders'));
+
+        const transactionResult = await runTransaction(db, async (transaction) => {
+            const merchantSnap = await transaction.get(merchantRef);
+            if (!merchantSnap.exists()) {
+                throw new Error('Store not found.');
+            }
+
+            const latestMerchant = merchantSnap.data();
+            const latestProducts = Array.isArray(latestMerchant.products) ? [...latestMerchant.products] : [];
+            const orderPayload = [];
+
+            for (const item of cartItems) {
+                const product = latestProducts[item.productIndex];
+                if (!product) {
+                    throw new Error('One of the selected products is no longer available.');
+                }
+
+                const stock = Math.max(0, Number(product.stock) || 0);
+                const quantity = Math.max(1, Number(item.quantity) || 1);
+                if (quantity > stock) {
+                    throw new Error(`${product.name}: only ${stock} left in stock.`);
+                }
+
+                const unitPrice = Math.max(0, Number(product.price) || 0);
+                latestProducts[item.productIndex] = {
+                    ...product,
+                    stock: Math.max(0, stock - quantity)
+                };
+
+                orderPayload.push({
+                    name: product.name || 'Product',
+                    image: product.image || '',
+                    price: unitPrice,
+                    quantity,
+                    total: unitPrice * quantity
+                });
+            }
+
+            const transactionTotalItems = orderPayload.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+            const transactionSubtotal = orderPayload.reduce((sum, item) => sum + (Number(item.total) || 0), 0);
+
+            transaction.set(orderRef, {
+                userId: currentUser.id || currentUser.phone,
+                customerName: currentUser.name || 'Customer',
+                customerPhone: currentUser.phone || '',
+                storeId: merchant.id,
+                merchantId: merchant.id,
+                storeName: merchant.name,
+                items: orderPayload,
+                totalItems: transactionTotalItems,
+                subtotal: transactionSubtotal,
+                status: 'pending',
+                createdAt: Timestamp.now()
+            });
+            transaction.update(merchantRef, { products: latestProducts });
+
+            return {
+                updatedProducts: latestProducts,
+                totalItems: transactionTotalItems,
+                subtotal: transactionSubtotal
+            };
+        });
+        const updatedProducts = transactionResult.updatedProducts;
+
+        const merchantIndex = allMerchants.findIndex(m => m.id === merchantId);
+        if (merchantIndex >= 0) {
+            allMerchants[merchantIndex] = { ...allMerchants[merchantIndex], products: updatedProducts };
+        }
+
+        venueProfileState.cartByMerchant[merchantId] = [];
+        showToast('Order placed successfully!', 'success');
+        renderVenueProfile(allMerchants.find(m => m.id === merchantId) || merchant);
+    } catch (error) {
+        console.error('Checkout error:', error);
+        showToast(error?.message || 'Failed to place order. Please try again.', 'error');
+    }
+};
+
+function renderVenueProfile(merchant) {
+    currentVenueProfileMerchantId = merchant.id;
+    const container = document.getElementById('venue-profile-content');
+    const rating = getStoreRating(merchant.id);
+    const now = new Date();
+    const activeTab = venueProfileState.activeTabByMerchant[merchant.id] || 'services';
+
+    // Get active offers for this merchant
+    const merchantOffers = getActiveMerchantOffers(merchant.id, now);
+
+    // Get reviews for this store
+    const storeReviews = allReviews.filter(r => r.storeId === merchant.id)
+        .sort((a, b) => {
+            const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
+            const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
+            return dateB - dateA;
+        });
+
+    // Image Gallery
+    let galleryHTML = '';
+    // Use gallery array if exists, fallback to photoUrl, otherwise empty
+    let images = [];
+    if (merchant.gallery && merchant.gallery.length > 0) {
+        images = merchant.gallery;
+    } else if (merchant.photoUrl) {
+        images = [merchant.photoUrl, "https://images.unsplash.com/photo-1560066984-138dadb4c035?auto=format&fit=crop&q=80&w=600", "https://images.unsplash.com/photo-1521590832167-7bcbfaa6381f?auto=format&fit=crop&q=80&w=600"]; // Demo gallery filler if only 1 image
+    }
+    
+    if (images.length > 0) {
+        galleryHTML = `
+            <div class="venue-gallery-container">
+                <div class="venue-gallery-track">
+                    ${images.map(url => `<img class="venue-gallery-img" src="${url}" onerror="this.style.display='none'">`).join('')}
+                </div>
+            </div>
+        `;
+    } else {
+        galleryHTML = `<div class="venue-hero-img" style="background: linear-gradient(135deg, #f3e8ff 0%, #fce7f3 100%); display:flex; align-items:center; justify-content:center; font-size:4rem; height: 250px;">${merchant.image || '🏪'}</div>`;
+    }
+
+    // Rating HTML
+    const ratingHTML = rating.count > 0
+        ? `<div class="venue-hero-rating">
+                <span class="stars">${generateStarHTML(parseFloat(rating.avg))}</span>
+                <span class="score">${rating.avg}</span>
+                <span class="count">(${rating.count} review${rating.count > 1 ? 's' : ''})</span>
+           </div>`
+        : `<div class="venue-hero-rating"><span class="count" style="color:#9ca3af;">No reviews yet</span></div>`;
+
+    // Services HTML (Grouped)
+    const services = merchant.services || [];
+    let servicesHTML = '';
+    if (services.length > 0) {
+        // Group by category
+        const categorized = {};
+        services.forEach(s => {
+            const cat = s.category || 'Featured Services';
+            if (!categorized[cat]) categorized[cat] = [];
+            categorized[cat].push(s);
+        });
+
+        for (const [catName, catServices] of Object.entries(categorized)) {
+            servicesHTML += `<h3 class="venue-service-category-title">${catName}</h3>`;
+            servicesHTML += catServices.map(s => {
+                const basePrice = Number(s.price) || 0;
+                const serviceOffers = merchantOffers.filter(o => o.serviceName === s.name);
+                const allDayOffers = serviceOffers.filter(o => !isOfferTimeRestricted(o));
+                const timedOffers = serviceOffers.filter(o => isOfferTimeRestricted(o));
+
+                const bestAllDayOffer = allDayOffers.reduce((best, current) => {
+                    const bestDiscount = Number(best?.discountPercent || 0);
+                    const currentDiscount = Number(current?.discountPercent || 0);
+                    return currentDiscount > bestDiscount ? current : best;
+                }, null);
+                const bestTimedOffer = timedOffers.reduce((best, current) => {
+                    const bestDiscount = Number(best?.discountPercent || 0);
+                    const currentDiscount = Number(current?.discountPercent || 0);
+                    return currentDiscount > bestDiscount ? current : best;
+                }, null);
+
+                const hasAllDayOffer = !!bestAllDayOffer;
+                const discountedPrice = hasAllDayOffer ? Math.round(basePrice * (1 - ((Number(bestAllDayOffer.discountPercent) || 0) / 100))) : basePrice;
+                const priceDisplay = hasAllDayOffer
+                    ? `<span class="price-original">${basePrice.toLocaleString()} IQD</span><span class="price">${discountedPrice.toLocaleString()} IQD</span>`
+                    : `<span class="price">${basePrice.toLocaleString()} IQD</span>`;
+
+                const tagHTML = hasAllDayOffer
+                    ? `<span style="color:#ef4444; font-size:0.8rem;">-${bestAllDayOffer.discountPercent}%</span>`
+                    : bestTimedOffer
+                        ? `<span style="color:#ef4444; font-size:0.8rem;">-${bestTimedOffer.discountPercent}% Off-peak</span>`
+                        : '';
+
+                const offPeakHint = !hasAllDayOffer && bestTimedOffer
+                    ? `<span class="service-detail" style="display:block; margin-top: 4px; color:#6b7280;">Valid ${formatOfferHours(bestTimedOffer)}</span>`
+                    : '';
+
+                const serviceJson = encodeURIComponent(JSON.stringify({ name: s.name, price: basePrice, duration: s.duration }));
+                return `
+                    <div class="venue-service-card">
+                        <div class="venue-service-info">
+                            <h4>${s.name} ${tagHTML}</h4>
+                            <span class="service-detail">${s.duration} min</span>
+                            ${offPeakHint}
+                        </div>
+                        <div class="venue-service-price">
+                            ${priceDisplay}
+                            <button class="btn-book-service" onclick="event.stopPropagation(); openBookingFromProfile('${merchant.id}', '${serviceJson}')">Book</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+    } else {
+        servicesHTML = '<div class="venue-no-reviews">No services listed yet.</div>';
+    }
+
+    // Products / Shop HTML
+    const products = Array.isArray(merchant.products) ? merchant.products : [];
+    const cartItems = syncVenueCartWithProducts(merchant.id, products);
+    const cartTotals = calculateVenueCartTotals(cartItems, products);
+
+    const productCardsHTML = products.length > 0
+        ? products.map((product, index) => {
+            const price = Math.max(0, Number(product.price) || 0);
+            const stock = Math.max(0, Number(product.stock) || 0);
+            const outOfStock = stock <= 0;
+            const image = product.image || '';
+            const cartItem = cartItems.find(item => item.productIndex === index);
+            const inCartQty = cartItem ? cartItem.quantity : 0;
+
+            return `
+                <div class="shop-product-card ${outOfStock ? 'out-of-stock' : ''}">
+                    <div class="shop-product-image-wrap">
+                        ${image
+                            ? `<img class="shop-product-image" src="${image}" alt="${product.name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">`
+                            : ''
+                        }
+                        <div class="shop-product-fallback" style="${image ? 'display:none;' : 'display:flex;'}">Product</div>
+                    </div>
+                    <div class="shop-product-body">
+                        <h4>${product.name || 'Product'}</h4>
+                        <p class="shop-product-price">${price.toLocaleString()} IQD</p>
+                        <div class="shop-product-stock ${outOfStock ? 'empty' : ''}">
+                            ${outOfStock ? 'Out of stock' : `${stock} in stock`}
+                        </div>
+                        <button class="btn-book-service shop-add-btn" ${outOfStock ? 'disabled' : ''} onclick="addProductToCart('${merchant.id}', ${index})">
+                            ${outOfStock ? 'Unavailable' : inCartQty > 0 ? `Add More (${inCartQty} in cart)` : 'Add to Cart'}
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : '<div class="venue-no-reviews">No products available in this shop yet.</div>';
+
+    const cartListHTML = cartItems.length > 0
+        ? cartItems.map(item => {
+            const product = products[item.productIndex];
+            if (!product) return '';
+            const unitPrice = Math.max(0, Number(product.price) || 0);
+            const lineTotal = unitPrice * item.quantity;
+            const stock = Math.max(0, Number(product.stock) || 0);
+            return `
+                <div class="shop-cart-item">
+                    <div class="shop-cart-item-main">
+                        <div class="shop-cart-item-name">${product.name}</div>
+                        <div class="shop-cart-item-meta">${unitPrice.toLocaleString()} IQD each • ${stock} left</div>
+                    </div>
+                    <div class="shop-cart-item-actions">
+                        <button class="shop-qty-btn" onclick="changeShopCartQuantity('${merchant.id}', ${item.productIndex}, -1)">−</button>
+                        <span class="shop-qty-value">${item.quantity}</span>
+                        <button class="shop-qty-btn" onclick="changeShopCartQuantity('${merchant.id}', ${item.productIndex}, 1)" ${item.quantity >= stock ? 'disabled' : ''}>+</button>
+                        <button class="shop-remove-btn" onclick="removeFromShopCart('${merchant.id}', ${item.productIndex})">Remove</button>
+                    </div>
+                    <div class="shop-cart-item-total">${lineTotal.toLocaleString()} IQD</div>
+                </div>
+            `;
+        }).join('')
+        : '<div class="shop-cart-empty">Your cart is empty.</div>';
+
+    // Reviews HTML
+    let reviewsHTML = '';
+    if (storeReviews.length > 0) {
+        reviewsHTML = storeReviews.slice(0, 10).map(r => {
+            const date = r.createdAt?.toDate ? r.createdAt.toDate() : new Date(r.createdAt);
+            return `
+                <div class="review-card">
+                    <div class="review-card-header">
+                        <span class="reviewer-name">${r.customerName || 'Anonymous'}</span>
+                        <span class="review-date">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                    </div>
+                    <div class="review-stars">${generateStarHTML(r.rating)}</div>
+                    ${r.comment ? `<p class="review-text">${r.comment}</p>` : ''}
+                </div>
+            `;
+        }).join('');
+    } else {
+        reviewsHTML = '<div class="venue-no-reviews">No reviews yet. Be the first to rate this venue!</div>';
+    }
+
+    container.innerHTML = `
+        <button class="venue-back-btn" onclick="closeVenueProfile()">← Back to all venues</button>
+        
+        <div class="venue-hero">
+            ${galleryHTML}
+            <div class="venue-hero-body">
+                <div class="venue-hero-top">
+                    <h1>${merchant.name}</h1>
+                    <span class="venue-hero-tag">${merchant.category}</span>
+                </div>
+                ${ratingHTML}
+                <div class="venue-meta-row">
+                    <span>📍 ${merchant.address}</span>
+                    <span>📏 ${merchant.distance}</span>
+                    ${merchant.lat && merchant.lng ? `<span class="btn-map-link" onclick="showOnMap('${merchant.id}')" style="cursor:pointer; color: var(--primary); font-weight:500;"> View on Map</span>` : ''}
+                </div>
+            </div>
+        </div>
+
+        <div class="venue-profile-tabs">
+            <button class="venue-profile-tab ${activeTab === 'services' ? 'active' : ''}" onclick="switchVenueTab('services')">Services (${services.length})</button>
+            <button class="venue-profile-tab ${activeTab === 'shop' ? 'active' : ''}" onclick="switchVenueTab('shop')">Shop (${products.length})</button>
+            <button class="venue-profile-tab ${activeTab === 'reviews' ? 'active' : ''}" onclick="switchVenueTab('reviews')">Reviews (${storeReviews.length})</button>
+        </div>
+
+        <div class="venue-section" style="${activeTab === 'services' ? '' : 'display:none;'}">
+            <h2>Services (${services.length})</h2>
+            ${servicesHTML}
+        </div>
+
+        <div class="venue-section" style="${activeTab === 'shop' ? '' : 'display:none;'}">
+            <h2>Shop (${products.length})</h2>
+            <div class="venue-shop-layout">
+                <div class="venue-shop-grid">
+                    ${productCardsHTML}
+                </div>
+                <div class="venue-shop-cart">
+                    <h3>Cart (${cartTotals.totalItems})</h3>
+                    <div class="shop-cart-list">${cartListHTML}</div>
+                    <div class="shop-cart-summary">
+                        <div><span>Subtotal</span><strong>${cartTotals.subtotal.toLocaleString()} IQD</strong></div>
+                    </div>
+                    <button class="btn-primary full-width" onclick="checkoutShopCart('${merchant.id}')" ${cartItems.length === 0 ? 'disabled' : ''}>
+                        Checkout
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="venue-section" style="${activeTab === 'reviews' ? '' : 'display:none;'}">
+            <h2>Reviews (${storeReviews.length})</h2>
+            <div class="venue-reviews-list">
+                ${reviewsHTML}
+            </div>
+        </div>
+    `;
+
+    // Hide customer dashboard, show venue profile
+    document.getElementById('dashboard-customer').style.display = 'none';
+    document.getElementById('venue-profile-view').style.display = 'block';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+window.closeVenueProfile = function() {
+    currentVenueProfileMerchantId = null;
+    document.getElementById('venue-profile-view').style.display = 'none';
+    document.getElementById('dashboard-customer').style.display = 'block';
+};
+
+window.openBookingFromProfile = function(merchantId, preselectedServiceJson = null) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+
+    let initialServices = [];
+    if (preselectedServiceJson) {
+        try {
+            const preselectedService = JSON.parse(decodeURIComponent(preselectedServiceJson));
+            const basePrice = Number(preselectedService.price) || 0;
+            initialServices.push({
+                name: preselectedService.name,
+                price: basePrice,
+                basePrice: basePrice,
+                duration: preselectedService.duration
+            });
+        } catch(e) {
+            console.error("Failed to parse preselected service:", e);
+        }
+    }
+
+    // Reset State
+    bookedSlotsCache = {};
+    bookingState = {
+        merchant: merchant,
+        services: initialServices,
+        selectedStaff: null,
+        date: null,
+        time: null,
+        step: 1,
+        bookedSlots: null,
+        policyAgreed: false
+    };
+
+    renderBookingWizard();
+    document.getElementById('booking-modal').style.display = 'flex';
+};
+
+// ========== CONTACT FORM ==========
+window.handleContactSubmit = async function() {
+    const nameEle = document.getElementById('contact-name');
+    const emailEle = document.getElementById('contact-email');
+    const subjectEle = document.getElementById('contact-subject');
+    const messageEle = document.getElementById('contact-message');
+
+    if (!nameEle || !emailEle || !subjectEle || !messageEle) return;
+
+    const name = nameEle.value.trim();
+    const email = emailEle.value.trim();
+    const subject = subjectEle.value.trim();
+    const message = messageEle.value.trim();
+
+    if (!name || !email || !subject || !message) {
+        showToast('Please fill out all fields', 'error');
+        return;
+    }
+
+    try {
+        await addDoc(collection(db, "messages"), {
+            name,
+            email,
+            subject,
+            message,
+            createdAt: Timestamp.now()
+        });
+        showToast('Message sent successfully! We will get back to you soon.', 'success');
+        document.getElementById('contact-form').reset();
+    } catch (e) {
+        console.error("Error sending message: ", e);
+        showToast('Failed to send message. Please try again.', 'error');
+    }
+};
+
+// ========== CUSTOMER DASHBOARD (My Appointments) ==========
+window.openMyAppointments = async function() {
+    if (!currentUser || currentUser.role !== 'customer') return;
+
+    // Hide everything else
+    document.getElementById('dashboard-customer').style.display = 'none';
+    const venueProfileView = document.getElementById('venue-profile-view');
+    if(venueProfileView) venueProfileView.style.display = 'none';
+    
+    document.getElementById('customer-appointments-view').style.display = 'block';
+
+    const upcomingList = document.getElementById('appointments-list-upcoming');
+    const pastList = document.getElementById('appointments-list-past');
+
+    upcomingList.innerHTML = '<div class="loading-spinner">Loading...</div>';
+    pastList.innerHTML = '<div class="loading-spinner">Loading...</div>';
+
+    try {
+        // Query by userId (which is how submitBooking saves it)
+        const userId = currentUser.id || currentUser.phone;
+        const q = query(collection(db, "bookings"), where("userId", "==", userId));
+        const snapshot = await getDocs(q);
+
+        const now = new Date();
+        let upcoming = [];
+        let past = [];
+
+        snapshot.forEach(docSnap => {
+            const b = { id: docSnap.id, ...docSnap.data() };
+            // Parse appointment date from bookingDate (Timestamp or Date) or fall back to date string
+            let appointmentDate;
+            try {
+                if (b.bookingDate?.toDate) {
+                    appointmentDate = b.bookingDate.toDate();
+                } else if (b.bookingDate) {
+                    appointmentDate = new Date(b.bookingDate);
+                } else if (b.date && b.time) {
+                    appointmentDate = new Date(`${b.date}T${b.time}`);
+                } else {
+                    appointmentDate = new Date(0); // fallback to epoch
+                }
+            } catch(e) {
+                appointmentDate = new Date(0);
+            }
+            
+            if (appointmentDate > now && b.status !== 'cancelled') {
+                upcoming.push(b);
+            } else {
+                past.push(b);
+            }
+        });
+
+        // Render upcoming
+        if (upcoming.length > 0) {
+            upcoming.sort((a,b) => new Date(`${a.date}T${a.time}`) - new Date(`${b.date}T${b.time}`));
+            upcomingList.innerHTML = upcoming.map(b => generateAppointmentCard(b, true)).join('');
+        } else {
+            upcomingList.innerHTML = '<p style="color:#666;">No upcoming appointments.</p>';
+        }
+
+        // Render past
+        if (past.length > 0) {
+            past.sort((a,b) => new Date(`${b.date}T${b.time}`) - new Date(`${a.date}T${a.time}`));
+            pastList.innerHTML = past.map(b => generateAppointmentCard(b, false)).join('');
+        } else {
+            pastList.innerHTML = '<p style="color:#666;">No past appointments.</p>';
+        }
+
+    } catch (e) {
+        console.error("Error loading customer bookings: ", e);
+        upcomingList.innerHTML = '<p>Failed to load bookings.</p>';
+        pastList.innerHTML = '<p>Failed to load bookings.</p>';
+    }
+};
+
+window.closeMyAppointments = function() {
+    document.getElementById('customer-appointments-view').style.display = 'none';
+    document.getElementById('dashboard-customer').style.display = 'block';
+};
+
+window.switchAppointmentTab = function(tab) {
+    document.getElementById('tab-upcoming').classList.remove('active');
+    document.getElementById('tab-past').classList.remove('active');
+    document.getElementById('appointments-list-upcoming').style.display = 'none';
+    document.getElementById('appointments-list-past').style.display = 'none';
+
+    document.getElementById(`tab-${tab}`).classList.add('active');
+    document.getElementById(`appointments-list-${tab}`).style.display = 'flex';
+};
+
+function generateAppointmentCard(b, isUpcoming) {
+    const statusClass = b.status === 'cancelled' ? 'status-cancelled' : (isUpcoming ? 'status-upcoming' : 'status-past');
+    const statusText = b.status === 'cancelled' ? 'Cancelled' : (isUpcoming ? 'Upcoming' : 'Completed');
+    
+    // Resolve store name
+    const storeNameDisplay = b.storeName || (allMerchants.find(m => m.id === b.storeId)?.name) || 'Hewrina Venue';
+
+    // Parse date - could be bookingDate (Timestamp), date (string), or bookingTime
+    let dateDisplay = 'Date unavailable';
+    let timeDisplay = b.bookingTime || b.time || '';
+    try {
+        const d = b.bookingDate?.toDate ? b.bookingDate.toDate() : (b.bookingDate ? new Date(b.bookingDate) : (b.date ? new Date(b.date) : null));
+        if (d && !isNaN(d.getTime())) {
+            dateDisplay = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            if (!timeDisplay) {
+                timeDisplay = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+            }
+        }
+    } catch(e) {}
+
+    const staffLine = b.staffMember && b.staffMember.name && b.staffMember.name !== 'Anyone available' 
+        ? `<p><strong>Staff:</strong> ${b.staffMember.name}</p>` : '';
+
+    return `
+        <div class="appointment-card">
+            <div class="appointment-info">
+                <h3>${storeNameDisplay}</h3>
+                <p><strong>Date:</strong> ${dateDisplay} at ${timeDisplay}</p>
+                <p><strong>Services:</strong> ${b.services ? b.services.map(s => s.name).join(', ') : (b.serviceName || 'Details unavailable')}</p>
+                ${staffLine}
+                <p><strong>Total:</strong> ${(b.price || b.servicePrice || b.totalPrice) ? (b.price || b.servicePrice || b.totalPrice).toLocaleString() + ' IQD' : 'N/A'}</p>
+            </div>
+            <div class="appointment-meta">
+                <span class="appointment-status ${statusClass}">${statusText}</span>
+                ${!isUpcoming && b.status !== 'cancelled' ? `<button class="btn-outline" style="padding: 6px 12px; font-size: 0.85rem;" onclick="closeMyAppointments(); setTimeout(() => openMerchantDetails('${b.storeId}'), 100)">Rebook</button>` : ''}
+            </div>
+        </div>
+    `;
 }
