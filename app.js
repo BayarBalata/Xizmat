@@ -27,6 +27,8 @@ let infoWindow = null;
 let isPickingLocation = false;
 let pickerMarker = null;
 let pickedLocation = null;
+let venueProfileMap = null;
+let venueProfileMapMarker = null;
 
 // Utility: Custom Toast
 window.showToast = function (message, type = 'info') {
@@ -129,6 +131,8 @@ window.showConfirm = function (message) {
 // Initialization
 async function init() {
     setupEventListeners();
+    setupHomepageMotion();
+    updateHomepageMetrics();
     await loadOffersData(); // Load offers first so discounts show on cards
     await loadReviewsData(); // Load reviews for star ratings on cards
     await loadMerchants();
@@ -171,6 +175,7 @@ async function loadOffersData() {
         snapshot.forEach(docSnap => {
             allOffers.push({ id: docSnap.id, ...docSnap.data() });
         });
+        updateHomepageMetrics();
     } catch (error) {
         console.error('Error loading offers:', error);
     }
@@ -327,6 +332,262 @@ function calculateTotal(options = {}) {
     return calculateBookingPricing(options).finalTotal;
 }
 
+function formatCompactStat(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return '0';
+    if (numericValue >= 1000) {
+        return `${(numericValue / 1000).toFixed(numericValue >= 10000 ? 0 : 1).replace(/\.0$/, '')}k`;
+    }
+    return numericValue.toLocaleString();
+}
+
+function setHomepageMetricValue(id, value) {
+    const element = document.getElementById(id);
+    if (!element) return;
+
+    const numericValue = Math.max(0, Number(value) || 0);
+    const previousValue = Number(element.dataset.rawValue || 0);
+    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+
+    if (prefersReducedMotion || previousValue === numericValue) {
+        element.textContent = formatCompactStat(numericValue);
+        element.dataset.rawValue = String(numericValue);
+        return;
+    }
+
+    if (element._countRaf) {
+        cancelAnimationFrame(element._countRaf);
+    }
+
+    const startValue = Number.isFinite(previousValue) ? previousValue : 0;
+    const duration = 700;
+    const startTime = performance.now();
+    element.dataset.rawValue = String(numericValue);
+
+    const tick = (now) => {
+        const progress = Math.min((now - startTime) / duration, 1);
+        const currentValue = Math.round(startValue + ((numericValue - startValue) * progress));
+        element.textContent = formatCompactStat(currentValue);
+        if (progress < 1) {
+            element._countRaf = requestAnimationFrame(tick);
+        } else {
+            element._countRaf = null;
+        }
+    };
+
+    element._countRaf = requestAnimationFrame(tick);
+}
+
+function updateHomepageMetrics() {
+    const totalServices = allMerchants.reduce((sum, merchant) => sum + ((merchant.services || []).length), 0);
+    const liveOffers = allOffers.filter(offer => isOfferActiveAt(offer, new Date())).length;
+
+    setHomepageMetricValue('home-stat-venues', allMerchants.length);
+    setHomepageMetricValue('home-stat-services', totalServices);
+    setHomepageMetricValue('home-stat-reviews', allReviews.length);
+    setHomepageMetricValue('home-stat-offers', liveOffers);
+}
+
+function setupHomepageMotion() {
+    const revealTargets = document.querySelectorAll('[data-reveal]');
+    if (!revealTargets.length) return;
+
+    revealTargets.forEach((element, index) => {
+        element.style.setProperty('--reveal-delay', `${Math.min(index * 70, 280)}ms`);
+    });
+
+    if (!('IntersectionObserver' in window) || window.matchMedia?.('(max-width: 768px)')?.matches) {
+        revealTargets.forEach(element => element.classList.add('is-visible'));
+        return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            entry.target.classList.add('is-visible');
+            observer.unobserve(entry.target);
+        });
+    }, { threshold: 0.12, rootMargin: '0px 0px 180px 0px' });
+
+    revealTargets.forEach(element => observer.observe(element));
+}
+
+window.quickSearchCategory = function(category) {
+    const categoryInput = document.getElementById('search-category');
+    const treatmentInput = document.getElementById('search-treatment');
+    const sortInput = document.getElementById('search-sort');
+
+    if (categoryInput) categoryInput.value = category;
+    if (treatmentInput) treatmentInput.value = '';
+    if (sortInput) sortInput.value = 'default';
+
+    performSearch();
+    document.getElementById('explore')?.scrollIntoView({ behavior: 'smooth' });
+};
+
+function getBookableStaffOptions(merchant = bookingState.merchant) {
+    const explicitStaff = Array.isArray(merchant?.staff)
+        ? merchant.staff
+            .filter(st => st && typeof st.name === 'string' && st.name.trim())
+            .map((st, idx) => ({
+                id: st.id || `staff-${idx}`,
+                name: st.name.trim(),
+                role: st.role || 'Staff',
+                image: st.image || ''
+            }))
+        : [];
+
+    if (explicitStaff.length > 0) return explicitStaff;
+
+    const workerCount = Math.max(0, Number(merchant?.workerCount) || 0);
+    if (workerCount <= 0) return [];
+
+    return Array.from({ length: workerCount }, (_, idx) => ({
+        id: workerCount > 1 ? `worker-${idx + 1}` : 'solo-worker',
+        name: workerCount > 1 ? `Worker ${idx + 1}` : 'Main Specialist',
+        role: workerCount > 1 ? 'Team Member' : (merchant?.category || 'Specialist'),
+        image: ''
+    }));
+}
+
+function getAutomaticStaffChoice() {
+    return {
+        id: 'anyone',
+        name: 'Any available worker',
+        role: 'Automatically assigned',
+        image: ''
+    };
+}
+
+function normalizeStaffMember(staff) {
+    if (!staff) return null;
+
+    const id = staff.id != null ? String(staff.id).trim() : '';
+    const name = String(staff.name || '').trim();
+    if (!id && !name) return null;
+
+    return {
+        id: id || `staff-${name.toLowerCase().replace(/\s+/g, '-')}`,
+        name: name || 'Assigned Staff',
+        role: String(staff.role || '').trim(),
+        image: String(staff.image || '').trim()
+    };
+}
+
+function hasSpecificStaffSelection() {
+    return !!bookingState.selectedStaff && bookingState.selectedStaff.id !== 'anyone';
+}
+
+function doesBookingMatchSelectedStaff(bookingData, selectedStaff = bookingState.selectedStaff) {
+    if (!selectedStaff || selectedStaff.id === 'anyone') return true;
+
+    const bookingStaffId = bookingData?.staffMember?.id != null ? String(bookingData.staffMember.id) : '';
+    const bookingStaffName = (bookingData?.staffMember?.name || '').trim().toLowerCase();
+    const selectedStaffId = String(selectedStaff.id);
+    const selectedStaffName = (selectedStaff.name || '').trim().toLowerCase();
+
+    if (!bookingStaffId || bookingStaffId === 'anyone') {
+        return false;
+    }
+
+    return bookingStaffId === selectedStaffId || (bookingStaffName && bookingStaffName === selectedStaffName);
+}
+
+function getNormalizedBookingStatus(status) {
+    return String(status || '').trim().toLowerCase();
+}
+
+function isCancelledBookingStatus(status) {
+    const normalizedStatus = getNormalizedBookingStatus(status);
+    return normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
+}
+
+function getBookingDateValue(bookingLike) {
+    const value = bookingLike?.bookingDate ?? bookingLike;
+    if (!value) return null;
+    if (typeof value?.toDate === 'function') return value.toDate();
+
+    const parsed = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getBookingTimeKey(bookingLike) {
+    const rawTime = String(bookingLike?.bookingTime || bookingLike?.time || '').trim();
+    if (rawTime) return rawTime;
+
+    const bookingDate = getBookingDateValue(bookingLike);
+    if (!bookingDate) return '';
+    return `${bookingDate.getHours()}:${String(bookingDate.getMinutes()).padStart(2, '0')}`;
+}
+
+function isSameBookingSlot(bookingLike, targetDate, targetTimeKey) {
+    const bookingDate = getBookingDateValue(bookingLike);
+    if (!bookingDate) return false;
+
+    return bookingDate.getFullYear() === targetDate.getFullYear()
+        && bookingDate.getMonth() === targetDate.getMonth()
+        && bookingDate.getDate() === targetDate.getDate()
+        && getBookingTimeKey(bookingLike) === targetTimeKey;
+}
+
+function resolveRequestedStaffMember(staffOptions, selectedStaff) {
+    const normalizedSelectedStaff = normalizeStaffMember(selectedStaff);
+    if (!normalizedSelectedStaff || normalizedSelectedStaff.id === 'anyone') return null;
+
+    return staffOptions.find(staff => String(staff.id) === normalizedSelectedStaff.id)
+        || staffOptions.find(staff => String(staff.name || '').trim().toLowerCase() === normalizedSelectedStaff.name.toLowerCase())
+        || null;
+}
+
+function pickAutomaticallyAssignedStaff(staffOptions, seedValue = 0) {
+    if (!Array.isArray(staffOptions) || staffOptions.length === 0) return null;
+    const normalizedSeed = Math.abs(Number(seedValue) || 0);
+    return staffOptions[normalizedSeed % staffOptions.length];
+}
+
+function getBookingDateKey(dateValue) {
+    const bookingDate = getBookingDateValue(dateValue);
+    if (!bookingDate) return '';
+
+    const year = bookingDate.getFullYear();
+    const month = String(bookingDate.getMonth() + 1).padStart(2, '0');
+    const day = String(bookingDate.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function getBookingSlotDocId(storeId, dateValue, timeKey) {
+    const dateKey = getBookingDateKey(dateValue);
+    const normalizedTime = String(timeKey || '').replace(/:/g, '-');
+    return `${storeId}_${dateKey}_${normalizedTime}`;
+}
+
+function getBookingSlotRef(storeId, dateValue, timeKey) {
+    return doc(db, "bookingSlotAvailability", getBookingSlotDocId(storeId, dateValue, timeKey));
+}
+
+function getSlotAvailabilityState(slotSnap) {
+    const slotData = slotSnap?.exists?.() ? slotSnap.data() : {};
+
+    return {
+        slotData,
+        totalBookings: Math.max(0, Number(slotData.totalBookings) || 0),
+        occupiedStaffIds: Array.isArray(slotData.occupiedStaffIds) ? slotData.occupiedStaffIds.map(id => String(id)) : [],
+        occupiedStaffNames: Array.isArray(slotData.occupiedStaffNames)
+            ? slotData.occupiedStaffNames.map(name => String(name).trim().toLowerCase()).filter(Boolean)
+            : [],
+        bookingIds: Array.isArray(slotData.bookingIds) ? slotData.bookingIds.map(id => String(id)) : []
+    };
+}
+
+async function refreshBookedSlotsForCurrentSelection() {
+    if (!bookingState?.merchant?.id || !bookingState.date) return;
+    bookingState.bookedSlots = undefined;
+    renderBookingWizard();
+    const bookedSlots = await fetchBookedSlots(bookingState.merchant.id, bookingState.date);
+    bookingState.bookedSlots = bookedSlots;
+    renderBookingWizard();
+}
+
 function getSlotDiscountSummary(timeStr, dateStr = bookingState.date) {
     if (!bookingState?.merchant?.id || !dateStr || !Array.isArray(bookingState.services) || bookingState.services.length === 0) {
         return { hasDiscount: false };
@@ -368,6 +629,7 @@ async function loadReviewsData() {
             allReviews.push({ id: docSnap.id, ...docSnap.data() });
         });
         console.log(`Loaded ${allReviews.length} reviews`);
+        updateHomepageMetrics();
     } catch (error) {
         console.error('Error loading reviews:', error);
     }
@@ -764,6 +1026,7 @@ async function loadMerchants() {
         querySnapshot.forEach((doc) => {
             allMerchants.push({ id: doc.id, ...doc.data() });
         });
+        updateHomepageMetrics();
         renderMerchants();
     } catch (error) {
         console.error("Error loading merchants:", error);
@@ -890,6 +1153,13 @@ function initMap() {
     addMarkersToMap();
 }
 
+function getMerchantCoordinates(merchant) {
+    const lat = Number(merchant?.lat);
+    const lng = Number(merchant?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+}
+
 // Add markers for all merchants
 function addMarkersToMap() {
     // Clear existing markers
@@ -899,12 +1169,13 @@ function addMarkersToMap() {
     if (!map) return;
 
     allMerchants.forEach(merchant => {
-        if (!merchant.lat || !merchant.lng) return;
+        const coords = getMerchantCoordinates(merchant);
+        if (!coords) return;
 
         const markerColor = merchant.type === 'salon' ? '#9d4edd' : '#e0aaff';
 
         const marker = new google.maps.Marker({
-            position: { lat: merchant.lat, lng: merchant.lng },
+            position: coords,
             map: map,
             title: merchant.name,
             icon: {
@@ -989,7 +1260,13 @@ window.confirmRealBooking = async function (storeId, storeName, serviceName, pri
 // Show specific merchant on map
 window.showOnMap = function (id) {
     const merchant = allMerchants.find(m => m.id === id);
-    if (!merchant || !merchant.lat || !merchant.lng) return;
+    const coords = getMerchantCoordinates(merchant);
+    if (!merchant || !coords) return;
+
+    if (!window.google?.maps) {
+        window.open(`https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lng}`, '_blank', 'noopener');
+        return;
+    }
 
     mapModal.style.display = 'flex';
 
@@ -997,7 +1274,8 @@ window.showOnMap = function (id) {
         initMap();
         // Wait for map to initialize then center
         setTimeout(() => {
-            map.setCenter({ lat: merchant.lat, lng: merchant.lng });
+            google.maps.event.trigger(map, 'resize');
+            map.setCenter(coords);
             map.setZoom(15);
             // Find and click the marker
             const marker = markers.find(m => m.getTitle() === merchant.name);
@@ -1006,7 +1284,8 @@ window.showOnMap = function (id) {
             }
         }, 300);
     } else {
-        map.setCenter({ lat: merchant.lat, lng: merchant.lng });
+        google.maps.event.trigger(map, 'resize');
+        map.setCenter(coords);
         map.setZoom(15);
         const marker = markers.find(m => m.getTitle() === merchant.name);
         if (marker) {
@@ -1029,7 +1308,8 @@ let bookingState = {
     time: null,
     step: 1,
     bookedSlots: null,
-    policyAgreed: false
+    policyAgreed: false,
+    autoAssignSeed: null
 };
 
 function resetBookingState() {
@@ -1041,7 +1321,8 @@ function resetBookingState() {
         time: null,
         step: 1,
         bookedSlots: null,
-        policyAgreed: false
+        policyAgreed: false,
+        autoAssignSeed: null
     };
     bookingCalendarMonth = new Date();
     bookedSlotsCache = {};
@@ -1123,7 +1404,7 @@ function renderBookingWizard() {
     // Step 2: Select Staff
     else if (bookingState.step === 2) {
         content += renderBookingStepStaff();
-        const canProceed = !!bookingState.selectedStaff;
+        const canProceed = getBookableStaffOptions(bookingState.merchant).length === 0 || !!bookingState.selectedStaff;
         footer.innerHTML = `
             <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
             <button class="btn-primary" onclick="nextBookingStep()" ${!canProceed ? 'disabled' : ''}>Next </button>
@@ -1255,7 +1536,8 @@ window.toggleServiceSelection = function (name, basePrice, duration) {
 let bookedSlotsCache = {};
 
 async function fetchBookedSlots(merchantId, dateStr) {
-    const cacheKey = `${merchantId}_${dateStr}`;
+    const selectedStaffKey = hasSpecificStaffSelection() ? String(bookingState.selectedStaff.id) : 'all';
+    const cacheKey = `${merchantId}_${dateStr}_${selectedStaffKey}`;
     if (bookedSlotsCache[cacheKey]) return bookedSlotsCache[cacheKey];
 
     try {
@@ -1290,7 +1572,7 @@ async function fetchBookedSlots(merchantId, dateStr) {
         snapshot.forEach(docSnap => {
             const data = docSnap.data();
             // Only count non-cancelled bookings
-            if (data.status === 'cancelled') return;
+            if (isCancelledBookingStatus(data.status)) return;
 
             const bDate = data.bookingDate?.toDate ? data.bookingDate.toDate() : new Date(data.bookingDate);
             
@@ -1298,6 +1580,10 @@ async function fetchBookedSlots(merchantId, dateStr) {
             if (bDate.getFullYear() !== dayStart.getFullYear() ||
                 bDate.getMonth() !== dayStart.getMonth() ||
                 bDate.getDate() !== dayStart.getDate()) {
+                return;
+            }
+
+            if (!doesBookingMatchSelectedStaff(data)) {
                 return;
             }
 
@@ -1428,7 +1714,9 @@ function renderBookingStep2() {
             const isTodaySelected = selectedDate.toDateString() === now.toDateString();
             const currentMinutes = (now.getHours() * 60) + now.getMinutes();
             const bookedSlots = bookingState.bookedSlots || new Map();
-            const workerCount = bookingState.merchant.workerCount || 1;
+            const workerCount = hasSpecificStaffSelection()
+                ? 1
+                : Math.max(1, Number(bookingState.merchant.workerCount) || getBookableStaffOptions(bookingState.merchant).length || 1);
             let openSlotCount = 0;
             let fullyBookedCount = 0;
             let pastSlotCount = 0;
@@ -1577,6 +1865,14 @@ function renderBookingStep3() {
     const totalCost = pricing.finalTotal;
     const totalDuration = pricing.totalDuration;
     const serviceNames = bookingState.services.map(s => s.name).join(', ');
+    const bookableStaff = getBookableStaffOptions(bookingState.merchant);
+    const hasMultipleWorkers = bookableStaff.length > 1;
+    const isAutomaticAssignment = hasMultipleWorkers && !hasSpecificStaffSelection();
+    const selectedStaffLabel = hasSpecificStaffSelection()
+        ? bookingState.selectedStaff.name
+        : bookableStaff.length === 1
+            ? bookableStaff[0].name
+            : 'Any available worker';
 
     // Date formatting (e.g., "Tue, Mar 31")
     let dateStr = bookingState.date;
@@ -1619,10 +1915,10 @@ function renderBookingStep3() {
                 <span style="color: #888; font-size: 0.95rem;">Service</span>
                 <span style="color: #333; font-weight: 500; font-size: 0.95rem; text-align: right; max-width: 60%;">${serviceNames}</span>
             </div>
-            ${bookingState.selectedStaff ? `
+            ${(bookableStaff.length > 0 || bookingState.selectedStaff) ? `
             <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
-                <span style="color: #888; font-size: 0.95rem;">Staff Member</span>
-                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${bookingState.selectedStaff.name}</span>
+                <span style="color: #888; font-size: 0.95rem;">${isAutomaticAssignment ? 'Staff Preference' : 'Staff Member'}</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${selectedStaffLabel}</span>
             </div>
             ` : ''}
             <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
@@ -1657,6 +1953,12 @@ function renderBookingStep3() {
             </div>
         </div>
 
+        ${isAutomaticAssignment ? `
+        <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; font-size: 0.84rem; color: #1d4ed8; line-height: 1.5;">
+            A worker will be assigned automatically from the available team when you confirm this booking.
+        </div>
+        ` : ''}
+
         <div style="background: #FFF8E1; border: 1px solid #FFE082; border-radius: 10px; padding: 14px 16px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#F9A825" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="min-width: 20px; margin-top: 1px;">
                 <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
@@ -1674,34 +1976,59 @@ function renderBookingStep3() {
 // Navigation
 // --- STEP 2: STAFF SELECTION ---
 window.selectStaff = function(staffId, staffName) {
-    bookingState.selectedStaff = { id: staffId, name: staffName };
+    bookingState.selectedStaff = staffId === 'anyone'
+        ? getAutomaticStaffChoice()
+        : normalizeStaffMember({ id: staffId, name: staffName });
+    bookingState.time = null;
+
+    if (bookingState.date) {
+        refreshBookedSlotsForCurrentSelection();
+        return;
+    }
+
     renderBookingWizard();
 }
 
 function renderBookingStepStaff() {
-    const staff = bookingState.merchant.staff || [];
-    
+    const staff = getBookableStaffOptions(bookingState.merchant);
+
+    if (staff.length === 0) {
+        return `
+            <div class="staff-selection-container" style="padding: 18px; border: 1px solid var(--border); border-radius: 14px; background: #fff;">
+                <h3 style="margin: 0 0 8px;">Worker assignment</h3>
+                <p style="margin: 0; color: #6b7280; line-height: 1.5;">This venue has not set up named workers yet. Your booking will be assigned to the available team member automatically.</p>
+            </div>
+        `;
+    }
+
     let staffHTML = `
         <div class="staff-selection-container" style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px; max-height: 400px; overflow-y: auto;">
-            <div class="staff-card ${bookingState.selectedStaff?.id === 'anyone' ? 'selected' : ''}" 
-                 onclick="selectStaff('anyone', 'Anyone available')"
-                 style="display: flex; align-items: center; padding: 15px; border: 1px solid ${bookingState.selectedStaff?.id === 'anyone' ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; cursor: pointer; transition: all 0.2s; background: ${bookingState.selectedStaff?.id === 'anyone' ? '#fdfdfb' : '#fff'};">
-                <div style="width: 50px; height: 50px; border-radius: 50%; background: #f3f4f6; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; color: #666; margin-right: 15px;">🌟</div>
-                <div>
-                    <h4 style="margin: 0; font-size: 1.1rem;">Anyone available</h4>
-                    <p style="margin: 4px 0 0; font-size: 0.85rem; color: #666;">Maximum availability</p>
-                </div>
-            </div>
+            <div style="padding: 6px 2px 10px; color: #6b7280; font-size: 0.9rem;">${staff.length > 1 ? 'Choose a worker or let Hewrina assign the available one automatically.' : 'Choose the worker for this appointment.'}</div>
     `;
 
-    staff.forEach((st, idx) => {
-        const isSelected = bookingState.selectedStaff?.id === idx;
+    if (staff.length > 1) {
+        const isAutomaticSelection = !hasSpecificStaffSelection();
+        staffHTML += `
+            <div class="staff-card ${isAutomaticSelection ? 'selected' : ''}" 
+                 onclick="selectStaff('anyone', 'Any available worker')"
+                 style="display: flex; align-items: center; padding: 15px; border: 1px solid ${isAutomaticSelection ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; cursor: pointer; transition: all 0.2s; background: ${isAutomaticSelection ? '#fdfdfb' : '#fff'};">
+                <div style="width: 50px; height: 50px; border-radius: 50%; background: #ede9fe; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #5b21b6; margin-right: 15px; font-size: 1rem;">Any</div>
+                <div>
+                    <h4 style="margin: 0; font-size: 1.05rem;">No preference</h4>
+                    <p style="margin: 4px 0 0; font-size: 0.85rem; color: #666;">We will assign one of the available workers for this time.</p>
+                </div>
+            </div>
+        `;
+    }
+
+    staff.forEach((st) => {
+        const isSelected = bookingState.selectedStaff?.id === st.id;
         const defaultIcon = `<div style="width: 50px; height: 50px; border-radius: 50%; background: #e2e8f0; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #64748b; margin-right: 15px; font-size: 1.2rem;">${st.name.charAt(0)}</div>`;
         const imgIcon = `<img src="${st.image}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover; margin-right: 15px;">`;
 
         staffHTML += `
             <div class="staff-card ${isSelected ? 'selected' : ''}" 
-                 onclick="selectStaff(${idx}, '${st.name.replace(/'/g, "\\'")}')"
+                 onclick="selectStaff('${String(st.id).replace(/'/g, "\\'")}', '${st.name.replace(/'/g, "\\'")}')"
                  style="display: flex; align-items: center; padding: 15px; border: 1px solid ${isSelected ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; cursor: pointer; transition: all 0.2s; background: ${isSelected ? '#fdfdfb' : '#fff'};">
                 ${st.image ? imgIcon : defaultIcon}
                 <div>
@@ -1720,22 +2047,156 @@ function renderBookingStepStaff() {
 window.nextBookingStep = function () {
     bookingState.step++;
     if (bookingState.step === 2) {
-        if (!bookingState.merchant.staff || bookingState.merchant.staff.length === 0) {
-            bookingState.selectedStaff = { id: 'anyone', name: 'Anyone available' };
+        const bookableStaff = getBookableStaffOptions(bookingState.merchant);
+        if (bookableStaff.length <= 1) {
+            const onlyStaff = normalizeStaffMember(bookableStaff[0]);
+            bookingState.selectedStaff = onlyStaff;
             bookingState.step++; 
+        } else if (!bookingState.selectedStaff) {
+            bookingState.selectedStaff = getAutomaticStaffChoice();
         }
     }
     renderBookingWizard();
+
+    if (bookingState.step === 3 && bookingState.date && bookingState.bookedSlots === undefined) {
+        refreshBookedSlotsForCurrentSelection();
+    }
 }
 
 window.prevBookingStep = function () {
     bookingState.step--;
     if (bookingState.step === 2) {
-        if (!bookingState.merchant.staff || bookingState.merchant.staff.length === 0) {
+        if (getBookableStaffOptions(bookingState.merchant).length <= 1) {
             bookingState.step--; 
         }
     }
     renderBookingWizard();
+}
+
+async function createBookingTransaction({
+    bookingDateObj,
+    bookingServices,
+    pricing,
+    totalCost,
+    totalDuration,
+    commission,
+    autoAssignSeed
+}) {
+    const merchantRef = doc(db, "merchants", bookingState.merchant.id);
+    const bookingRef = doc(collection(db, 'bookings'));
+    const requestedTimeKey = bookingState.time;
+    const requestedStaff = normalizeStaffMember(bookingState.selectedStaff);
+    const requestedUiCount = Math.max(0, Number(bookingState.bookedSlots?.get?.(requestedTimeKey)) || 0);
+
+    return runTransaction(db, async (transaction) => {
+        const merchantSnap = await transaction.get(merchantRef);
+        if (!merchantSnap.exists()) {
+            throw new Error('Store not found.');
+        }
+
+        const latestMerchant = { id: merchantSnap.id, ...merchantSnap.data() };
+        const staffOptions = getBookableStaffOptions(latestMerchant)
+            .map(staff => normalizeStaffMember(staff))
+            .filter(Boolean);
+        const slotRef = getBookingSlotRef(latestMerchant.id, bookingDateObj, requestedTimeKey);
+        const slotSnap = await transaction.get(slotRef);
+        const slotState = getSlotAvailabilityState(slotSnap);
+        const bookingsAtRequestedTime = Math.max(slotState.totalBookings, requestedUiCount);
+        const occupiedStaffIds = new Set(slotState.occupiedStaffIds);
+        const occupiedStaffNames = new Set(slotState.occupiedStaffNames);
+
+        let assignedStaff = null;
+        let assignmentMode = 'unassigned';
+
+        if (staffOptions.length <= 1) {
+            if (bookingsAtRequestedTime >= 1) {
+                throw new Error('This time slot just filled up. Please choose another time.');
+            }
+            assignedStaff = staffOptions[0] || null;
+            assignmentMode = assignedStaff ? 'single-worker' : 'unassigned';
+        } else {
+            const requestedSpecificStaff = requestedStaff && requestedStaff.id !== 'anyone'
+                ? resolveRequestedStaffMember(staffOptions, requestedStaff)
+                : null;
+
+            if (requestedStaff && requestedStaff.id !== 'anyone' && !requestedSpecificStaff) {
+                throw new Error('Selected worker is no longer available. Please choose another worker.');
+            }
+
+            if (requestedSpecificStaff) {
+                const isOccupied = occupiedStaffIds.has(String(requestedSpecificStaff.id))
+                    || occupiedStaffNames.has(String(requestedSpecificStaff.name || '').trim().toLowerCase());
+                if (isOccupied) {
+                    throw new Error(`${requestedSpecificStaff.name} is no longer available at this time.`);
+                }
+                assignedStaff = requestedSpecificStaff;
+                assignmentMode = 'selected';
+            } else {
+                if (bookingsAtRequestedTime >= staffOptions.length) {
+                    throw new Error('This time slot just filled up. Please choose another time.');
+                }
+
+                const availableStaff = staffOptions.filter((staff) => {
+                    const normalizedName = String(staff.name || '').trim().toLowerCase();
+                    return !occupiedStaffIds.has(String(staff.id)) && !occupiedStaffNames.has(normalizedName);
+                });
+                const assignmentPool = availableStaff.length > 0 ? availableStaff : staffOptions;
+                assignedStaff = pickAutomaticallyAssignedStaff(assignmentPool, autoAssignSeed);
+                assignmentMode = 'automatic';
+            }
+        }
+
+        const bookingData = {
+            userId: currentUser.id || currentUser.phone,
+            customerName: currentUser.name,
+            customerPhone: currentUser.phone,
+            storeId: latestMerchant.id,
+            merchantId: latestMerchant.id,
+            storeName: latestMerchant.name,
+
+            services: bookingServices,
+            staffMember: assignedStaff || null,
+            staffAssignmentMode: assignmentMode,
+
+            serviceName: bookingState.services.map(s => s.name).join(', '),
+            servicePrice: totalCost,
+            price: totalCost,
+            serviceDuration: totalDuration,
+            basePriceTotal: pricing.baseTotal,
+            discountTotal: pricing.discountTotal,
+            appliedOffers: pricing.appliedOffers,
+
+            bookingDate: bookingDateObj,
+            bookingTime: requestedTimeKey,
+            status: 'pending',
+            commission: commission,
+            createdAt: new Date().toISOString()
+        };
+
+        transaction.set(bookingRef, bookingData);
+        transaction.set(slotRef, {
+            storeId: latestMerchant.id,
+            storeName: latestMerchant.name || '',
+            bookingDateKey: getBookingDateKey(bookingDateObj),
+            bookingDate: bookingDateObj,
+            bookingTime: requestedTimeKey,
+            totalBookings: bookingsAtRequestedTime + 1,
+            occupiedStaffIds: assignedStaff?.id
+                ? Array.from(new Set([...slotState.occupiedStaffIds, String(assignedStaff.id)]))
+                : slotState.occupiedStaffIds,
+            occupiedStaffNames: assignedStaff?.name
+                ? Array.from(new Set([...slotState.occupiedStaffNames, assignedStaff.name.toLowerCase()]))
+                : slotState.occupiedStaffNames,
+            bookingIds: Array.from(new Set([...slotState.bookingIds, bookingRef.id])),
+            updatedAt: new Date().toISOString()
+        }, { merge: true });
+
+        return {
+            bookingId: bookingRef.id,
+            assignedStaff,
+            assignmentMode
+        };
+    });
 }
 
 // Submit
@@ -1773,41 +2234,30 @@ window.submitBooking = async function () {
         price: getServiceBasePrice(service),
         duration: Number(service.duration) || 0
     }));
+    const autoAssignSeed = bookingState.autoAssignSeed ?? Date.now();
+    bookingState.autoAssignSeed = autoAssignSeed;
 
     try {
-        const bookingData = {
-            userId: currentUser.id || currentUser.phone,
-            customerName: currentUser.name,
-            customerPhone: currentUser.phone,
-            storeId: bookingState.merchant.id,
-            merchantId: bookingState.merchant.id,
-            storeName: bookingState.merchant.name,
-
-            services: bookingServices,
-            staffMember: bookingState.selectedStaff || null,
-
-            serviceName: bookingState.services.map(s => s.name).join(', '),
-            servicePrice: totalCost,
-            price: totalCost,
-            serviceDuration: totalDuration,
-            basePriceTotal: pricing.baseTotal,
-            discountTotal: pricing.discountTotal,
-            appliedOffers: pricing.appliedOffers,
-
-            bookingDate: bookingDateObj,
-            bookingTime: bookingState.time,
-            status: 'pending',
-            commission: commission,
-            createdAt: new Date().toISOString()
-        };
-
-        await addDoc(collection(db, 'bookings'), bookingData);
+        const transactionResult = await createBookingTransaction({
+            bookingDateObj,
+            bookingServices,
+            pricing,
+            totalCost,
+            totalDuration,
+            commission,
+            autoAssignSeed
+        });
 
         // Invalidate booked slots cache so the slot shows as taken
         bookedSlotsCache = {};
 
-        showToast('Booking Request Sent! ', 'success');
+        const assignedStaffName = transactionResult?.assignedStaff?.name;
+        const successMessage = assignedStaffName
+            ? `Booking Request Sent! Assigned to ${assignedStaffName}.`
+            : 'Booking Request Sent!';
+        showToast(successMessage, 'success');
         document.getElementById('booking-modal').style.display = 'none';
+        resetBookingState();
 
         // Refresh if needed
         if (currentUser.role === 'admin') loadFinancials();
@@ -3997,6 +4447,54 @@ window.updateShopOrderStatus = async function (orderId, newStatus) {
     }
 };
 
+async function reconcileStoreCalendarEntries(bookingId, newStatus, canonicalEvent = null) {
+    const calendarQuery = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
+    const calendarSnapshot = await getDocs(calendarQuery);
+    const operations = [];
+
+    if (newStatus === 'cancelled') {
+        calendarSnapshot.forEach((calendarDoc) => {
+            operations.push(deleteDoc(doc(db, "storeCalendar", calendarDoc.id)));
+        });
+        await Promise.all(operations);
+        return;
+    }
+
+    if (newStatus === 'confirmed') {
+        let hasCanonicalDoc = false;
+        calendarSnapshot.forEach((calendarDoc) => {
+            if (calendarDoc.id === bookingId) {
+                hasCanonicalDoc = true;
+                return;
+            }
+            operations.push(deleteDoc(doc(db, "storeCalendar", calendarDoc.id)));
+        });
+
+        if (!hasCanonicalDoc && canonicalEvent) {
+            operations.push(setDoc(doc(db, "storeCalendar", bookingId), canonicalEvent));
+        }
+
+        await Promise.all(operations);
+        return;
+    }
+
+    if (newStatus === 'completed') {
+        const completedAt = new Date().toISOString();
+        calendarSnapshot.forEach((calendarDoc) => {
+            if (calendarDoc.id === bookingId) {
+                operations.push(updateDoc(doc(db, "storeCalendar", calendarDoc.id), {
+                    status: 'completed',
+                    updatedAt: completedAt
+                }));
+                return;
+            }
+            operations.push(deleteDoc(doc(db, "storeCalendar", calendarDoc.id)));
+        });
+
+        await Promise.all(operations);
+    }
+}
+
 // Update Booking Status (Confirm/Reject/Complete)
 window.updateBookingStatus = async function (bookingId, newStatus) {
     // Confirmation messages for each action
@@ -4011,77 +4509,128 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
 
     try {
         const bookingRef = doc(db, "bookings", bookingId);
-        const bookingSnap = await getDoc(bookingRef);
+        const calendarRef = doc(db, "storeCalendar", bookingId);
+        const normalizedNewStatus = getNormalizedBookingStatus(newStatus);
 
-        if (!bookingSnap.exists()) {
-            showToast('Booking not found!', 'error');
-            return;
-        }
+        const transactionResult = await runTransaction(db, async (transaction) => {
+            const bookingSnap = await transaction.get(bookingRef);
+            if (!bookingSnap.exists()) {
+                throw new Error('Booking not found!');
+            }
 
-        const bookingData = bookingSnap.data();
+            const bookingData = bookingSnap.data();
 
-        // Authorization: Only the merchant who owns this booking's store (or admin) can update
-        if (currentUser.role === 'owner' && bookingData.storeId !== currentUser.storeId) {
-            showToast('You can only update bookings for your own store.', 'error');
-            return;
-        }
+            // Authorization: Only the merchant who owns this booking's store (or admin) can update
+            if (currentUser.role === 'owner' && bookingData.storeId !== currentUser.storeId) {
+                throw new Error('You can only update bookings for your own store.');
+            }
 
-        // Update booking status
-        await updateDoc(bookingRef, {
-            status: newStatus,
-            updatedAt: new Date().toISOString()
+            const previousStatus = getNormalizedBookingStatus(bookingData.status || 'pending');
+            const statusChanged = previousStatus !== normalizedNewStatus;
+            const calendarSnap = await transaction.get(calendarRef);
+            const slotRef = getBookingSlotRef(
+                bookingData.storeId || bookingData.merchantId || '',
+                bookingData.bookingDate,
+                bookingData.bookingTime || bookingData.time
+            );
+            const slotSnap = await transaction.get(slotRef);
+            const slotState = getSlotAvailabilityState(slotSnap);
+            const updatedAt = new Date().toISOString();
+            let calendarEvent = null;
+
+            transaction.update(bookingRef, {
+                status: normalizedNewStatus,
+                updatedAt
+            });
+
+            if (normalizedNewStatus === 'confirmed') {
+                const existingCalendar = calendarSnap.exists() ? calendarSnap.data() : {};
+                calendarEvent = {
+                    bookingId: bookingId,
+                    storeId: bookingData.storeId || '',
+                    storeName: bookingData.storeName || '',
+                    customerName: bookingData.customerName || 'Customer',
+                    customerPhone: bookingData.customerPhone || '',
+                    serviceName: bookingData.serviceName || 'Service',
+                    staffMember: bookingData.staffMember || null,
+                    price: bookingData.price || 0,
+                    duration: bookingData.serviceDuration || bookingData.duration || 30,
+                    bookingDate: bookingData.bookingDate || new Date().toISOString(),
+                    bookingTime: bookingData.bookingTime || bookingData.time || '10:00',
+                    status: 'confirmed',
+                    createdAt: existingCalendar.createdAt || updatedAt,
+                    updatedAt
+                };
+                transaction.set(calendarRef, calendarEvent, { merge: true });
+            } else if (normalizedNewStatus === 'cancelled') {
+                if (calendarSnap.exists()) {
+                    transaction.delete(calendarRef);
+                }
+                if (slotSnap.exists()) {
+                    const assignedStaff = normalizeStaffMember(bookingData.staffMember);
+                    const nextTotalBookings = Math.max(0, slotState.totalBookings - 1);
+                    const nextOccupiedStaffIds = assignedStaff?.id
+                        ? slotState.occupiedStaffIds.filter(id => id !== String(assignedStaff.id))
+                        : slotState.occupiedStaffIds;
+                    const normalizedAssignedName = String(assignedStaff?.name || '').trim().toLowerCase();
+                    const nextOccupiedStaffNames = normalizedAssignedName
+                        ? slotState.occupiedStaffNames.filter(name => name !== normalizedAssignedName)
+                        : slotState.occupiedStaffNames;
+                    const nextBookingIds = slotState.bookingIds.filter(id => id !== bookingId);
+
+                    if (nextTotalBookings <= 0) {
+                        transaction.delete(slotRef);
+                    } else {
+                        transaction.set(slotRef, {
+                            totalBookings: nextTotalBookings,
+                            occupiedStaffIds: nextOccupiedStaffIds,
+                            occupiedStaffNames: nextOccupiedStaffNames,
+                            bookingIds: nextBookingIds,
+                            updatedAt
+                        }, { merge: true });
+                    }
+                }
+            } else if (normalizedNewStatus === 'completed') {
+                if (calendarSnap.exists()) {
+                    transaction.update(calendarRef, {
+                        status: 'completed',
+                        updatedAt
+                    });
+                }
+            }
+
+            return {
+                bookingData,
+                previousStatus,
+                statusChanged,
+                calendarEvent
+            };
         });
 
-        // If confirmed, add to store calendar
-        if (newStatus === 'confirmed') {
-            const calendarEvent = {
-                bookingId: bookingId,
-                storeId: bookingData.storeId || '',
-                storeName: bookingData.storeName || '',
-                customerName: bookingData.customerName || 'Customer',
-                customerPhone: bookingData.customerPhone || '',
-                serviceName: bookingData.serviceName || 'Service',
-                price: bookingData.price || 0,
-                duration: bookingData.serviceDuration || bookingData.duration || 30,
-                bookingDate: bookingData.bookingDate || new Date().toISOString(),
-                bookingTime: bookingData.bookingTime || bookingData.time || '10:00',
-                status: 'confirmed',
-                createdAt: new Date().toISOString()
-            };
-
-            await addDoc(collection(db, "storeCalendar"), calendarEvent);
+        if (normalizedNewStatus === 'confirmed') {
+            await reconcileStoreCalendarEntries(bookingId, 'confirmed', transactionResult.calendarEvent);
             showToast(' Booking Confirmed & Added to Calendar!', 'success');
-        } else if (newStatus === 'cancelled') {
-            // Remove from calendar if exists
-            const calQ = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
-            const calSnap = await getDocs(calQ);
-            calSnap.forEach(async (d) => {
-                await deleteDoc(doc(db, "storeCalendar", d.id));
-            });
+        } else if (normalizedNewStatus === 'cancelled') {
+            await reconcileStoreCalendarEntries(bookingId, 'cancelled');
             showToast(' Booking Declined', 'info');
-        } else if (newStatus === 'completed') {
-            // Update calendar event status
-            const calQ = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
-            const calSnap = await getDocs(calQ);
-            calSnap.forEach(async (d) => {
-                await updateDoc(doc(db, "storeCalendar", d.id), { status: 'completed' });
-            });
+        } else if (normalizedNewStatus === 'completed') {
+            await reconcileStoreCalendarEntries(bookingId, 'completed');
 
             // === FINANCIAL TRACKING ===
             // Handle both legacy and new price fields
             let servicePrice = 0;
-            if (bookingData.price !== undefined) servicePrice = Number(bookingData.price);
-            else if (bookingData.servicePrice !== undefined) servicePrice = Number(bookingData.servicePrice);
+            if (transactionResult.bookingData.price !== undefined) servicePrice = Number(transactionResult.bookingData.price);
+            else if (transactionResult.bookingData.servicePrice !== undefined) servicePrice = Number(transactionResult.bookingData.servicePrice);
 
             const commission = Math.round(servicePrice * 0.10); // 10% commission
-            const storeId = bookingData.storeId || bookingData.merchantId || currentUser.storeId;
+            const storeId = transactionResult.bookingData.storeId || transactionResult.bookingData.merchantId || currentUser.storeId;
 
-            console.log('Financial tracking:', { storeId, servicePrice, commission, raw: bookingData });
+            console.log('Financial tracking:', { storeId, servicePrice, commission, raw: transactionResult.bookingData });
 
             if (!storeId) {
                 console.error('No storeId found for financial tracking!');
                 showToast('Warning: Financials not updated (missing store ID)', 'warning');
-            } else {
+            } else if (transactionResult.statusChanged) {
                 // Update store financials
                 const storeFinRef = doc(db, "storeFinancials", storeId);
 
@@ -4098,7 +4647,7 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
                     } else {
                         await setDoc(storeFinRef, {
                             storeId: storeId,
-                            storeName: bookingData.storeName || '',
+                            storeName: transactionResult.bookingData.storeName || '',
                             totalRevenue: servicePrice,
                             totalCommission: commission,
                             paidCommission: 0,
@@ -4115,13 +4664,13 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
                 try {
                     await addDoc(collection(db, "storeTransactions"), {
                         storeId: storeId,
-                        storeName: bookingData.storeName || '',
+                        storeName: transactionResult.bookingData.storeName || '',
                         bookingId: bookingId,
                         type: 'revenue',
                         amount: servicePrice,
                         commission: commission,
-                        serviceName: bookingData.serviceName || 'Service',
-                        customerName: bookingData.customerName || 'Customer',
+                        serviceName: transactionResult.bookingData.serviceName || 'Service',
+                        customerName: transactionResult.bookingData.customerName || 'Customer',
                         createdAt: new Date().toISOString()
                     });
                 } catch (err) {
@@ -4134,6 +4683,8 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
                 if (document.getElementById('owner-financials').style.display !== 'none') {
                     loadOwnerFinancials();
                 }
+            } else {
+                showToast(' Booking already marked as completed.', 'info');
             }
         }
 
@@ -4734,7 +5285,13 @@ async function saveOwnerStaff(e) {
     const store = allMerchants.find(m => m.id === currentUser.storeId);
     if (!store.staff) store.staff = [];
 
-    const newStaff = { name, role, image };
+    const existingId = index >= 0 ? (store.staff[index]?.id || null) : null;
+    const newStaff = {
+        id: existingId || `staff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name,
+        role,
+        image
+    };
 
     if (index === -1) {
         store.staff.push(newStaff);
@@ -5596,6 +6153,42 @@ const venueProfileState = {
     cartByMerchant: {}
 };
 
+function renderVenueProfileMiniMap(merchant) {
+    const mapContainer = document.getElementById('venue-profile-mini-map');
+    if (!mapContainer) return;
+
+    const coords = getMerchantCoordinates(merchant);
+    if (!coords) {
+        mapContainer.innerHTML = '<div class="venue-mini-map-fallback">Location coordinates are not available for this store yet.</div>';
+        return;
+    }
+
+    if (!window.google?.maps) {
+        mapContainer.innerHTML = '<div class="venue-mini-map-fallback">Map is still loading. Use the directions button to open the store location.</div>';
+        return;
+    }
+
+    venueProfileMap = new google.maps.Map(mapContainer, {
+        center: coords,
+        zoom: 15,
+        disableDefaultUI: true,
+        gestureHandling: 'cooperative',
+        clickableIcons: false,
+        styles: [
+            {
+                featureType: 'poi.business',
+                stylers: [{ visibility: 'off' }]
+            }
+        ]
+    });
+
+    venueProfileMapMarker = new google.maps.Marker({
+        position: coords,
+        map: venueProfileMap,
+        title: merchant.name
+    });
+}
+
 function getVenueCartItems(merchantId) {
     if (!venueProfileState.cartByMerchant[merchantId]) {
         venueProfileState.cartByMerchant[merchantId] = [];
@@ -5633,6 +6226,53 @@ function calculateVenueCartTotals(cartItems, products) {
     }, { totalItems: 0, subtotal: 0 });
 }
 
+function getVenueGalleryImages(merchant) {
+    const galleryImages = Array.isArray(merchant?.gallery)
+        ? merchant.gallery.filter(url => typeof url === 'string' && url.trim())
+        : [];
+    const primaryImage = typeof merchant?.photoUrl === 'string' && merchant.photoUrl.trim()
+        ? [merchant.photoUrl]
+        : [];
+
+    return [...new Set([...primaryImage, ...galleryImages])].slice(0, 5);
+}
+
+function getVenueTeamMembers(merchant) {
+    const explicitTeam = getBookableStaffOptions(merchant);
+    if (explicitTeam.length > 0) return explicitTeam;
+
+    const workerCount = Math.max(0, Number(merchant?.workerCount) || 0);
+    if (workerCount <= 0) return [];
+
+    return Array.from({ length: workerCount }, (_, idx) => ({
+        id: workerCount > 1 ? `worker-${idx + 1}` : 'solo-worker',
+        name: workerCount > 1 ? `Worker ${idx + 1}` : 'Main Specialist',
+        role: merchant?.category || 'Specialist',
+        image: ''
+    }));
+}
+
+function getVenueInitials(name = '') {
+    const parts = String(name)
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2);
+
+    if (parts.length === 0) return 'HV';
+    return parts.map(part => part[0].toUpperCase()).join('');
+}
+
+function getVenueSectionId(sectionName) {
+    return `venue-section-${sectionName}`;
+}
+
+function scrollVenueProfileSection(sectionName, behavior = 'smooth') {
+    const section = document.getElementById(getVenueSectionId(sectionName));
+    if (!section) return;
+    section.scrollIntoView({ behavior, block: 'start' });
+}
+
 window.openMerchantDetails = function (id, preselectedServiceJson = null) {
     const merchant = allMerchants.find(m => m.id === id);
     if (!merchant) return;
@@ -5657,7 +6297,7 @@ window.switchVenueTab = function (tabName) {
     const merchant = allMerchants.find(m => m.id === currentVenueProfileMerchantId);
     if (!merchant) return;
     venueProfileState.activeTabByMerchant[currentVenueProfileMerchantId] = tabName;
-    renderVenueProfile(merchant);
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: tabName });
 };
 
 window.addProductToCart = function (merchantId, productIndex) {
@@ -5686,7 +6326,7 @@ window.addProductToCart = function (merchantId, productIndex) {
 
     venueProfileState.activeTabByMerchant[merchantId] = 'shop';
     showToast('Product added to cart.', 'success');
-    renderVenueProfile(merchant);
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: 'shop' });
 };
 
 window.changeShopCartQuantity = function (merchantId, productIndex, delta) {
@@ -5710,7 +6350,7 @@ window.changeShopCartQuantity = function (merchantId, productIndex, delta) {
         venueProfileState.cartByMerchant[merchantId] = cartItems.filter(entry => entry.productIndex !== productIndex);
     }
 
-    renderVenueProfile(merchant);
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: 'shop' });
 };
 
 window.removeFromShopCart = function (merchantId, productIndex) {
@@ -5718,7 +6358,7 @@ window.removeFromShopCart = function (merchantId, productIndex) {
     if (!merchant) return;
     const cartItems = getVenueCartItems(merchantId);
     venueProfileState.cartByMerchant[merchantId] = cartItems.filter(entry => entry.productIndex !== productIndex);
-    renderVenueProfile(merchant);
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: 'shop' });
 };
 
 window.checkoutShopCart = async function (merchantId) {
@@ -5844,24 +6484,22 @@ window.checkoutShopCart = async function (merchantId) {
 
         venueProfileState.cartByMerchant[merchantId] = [];
         showToast('Order placed successfully!', 'success');
-        renderVenueProfile(allMerchants.find(m => m.id === merchantId) || merchant);
+        renderVenueProfile(allMerchants.find(m => m.id === merchantId) || merchant, { preserveScroll: true, focusSection: 'shop' });
     } catch (error) {
         console.error('Checkout error:', error);
         showToast(error?.message || 'Failed to place order. Please try again.', 'error');
     }
 };
 
-function renderVenueProfile(merchant) {
+function renderVenueProfile(merchant, options = {}) {
     currentVenueProfileMerchantId = merchant.id;
     const container = document.getElementById('venue-profile-content');
+    if (!container) return;
+
     const rating = getStoreRating(merchant.id);
     const now = new Date();
     const activeTab = venueProfileState.activeTabByMerchant[merchant.id] || 'services';
-
-    // Get active offers for this merchant
     const merchantOffers = getActiveMerchantOffers(merchant.id, now);
-
-    // Get reviews for this store
     const storeReviews = allReviews.filter(r => r.storeId === merchant.id)
         .sort((a, b) => {
             const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
@@ -5869,108 +6507,171 @@ function renderVenueProfile(merchant) {
             return dateB - dateA;
         });
 
-    // Image Gallery
-    let galleryHTML = '';
-    // Use gallery array if exists, fallback to photoUrl, otherwise empty
-    let images = [];
-    if (merchant.gallery && merchant.gallery.length > 0) {
-        images = merchant.gallery;
-    } else if (merchant.photoUrl) {
-        images = [merchant.photoUrl, "https://images.unsplash.com/photo-1560066984-138dadb4c035?auto=format&fit=crop&q=80&w=600", "https://images.unsplash.com/photo-1521590832167-7bcbfaa6381f?auto=format&fit=crop&q=80&w=600"]; // Demo gallery filler if only 1 image
-    }
-    
-    if (images.length > 0) {
-        galleryHTML = `
-            <div class="venue-gallery-container">
-                <div class="venue-gallery-track">
-                    ${images.map(url => `<img class="venue-gallery-img" src="${url}" onerror="this.style.display='none'">`).join('')}
-                </div>
-            </div>
-        `;
-    } else {
-        galleryHTML = `<div class="venue-hero-img" style="background: linear-gradient(135deg, #f3e8ff 0%, #fce7f3 100%); display:flex; align-items:center; justify-content:center; font-size:4rem; height: 250px;">${merchant.image || '🏪'}</div>`;
-    }
+    const services = merchant.services || [];
+    const products = Array.isArray(merchant.products) ? merchant.products : [];
+    const cartItems = syncVenueCartWithProducts(merchant.id, products);
+    const cartTotals = calculateVenueCartTotals(cartItems, products);
+    const images = getVenueGalleryImages(merchant);
+    const teamMembers = getVenueTeamMembers(merchant);
+    const teamCount = Math.max(teamMembers.length, Math.max(0, Number(merchant.workerCount) || 0));
+    const canPreselectStaff = getBookableStaffOptions(merchant).length > 0;
+    const aboutText = String(merchant.description || merchant.about || merchant.bio || '').trim();
+    const aboutFallback = `${merchant.name} is available for online booking on Hewrina. Browse services, review the team, and use the location section for directions before you book.`;
 
-    // Rating HTML
+    const merchantCoords = getMerchantCoordinates(merchant);
+    const directionsUrl = merchantCoords
+        ? `https://www.google.com/maps/search/?api=1&query=${merchantCoords.lat},${merchantCoords.lng}`
+        : '#';
+
     const ratingHTML = rating.count > 0
         ? `<div class="venue-hero-rating">
                 <span class="stars">${generateStarHTML(parseFloat(rating.avg))}</span>
                 <span class="score">${rating.avg}</span>
-                <span class="count">(${rating.count} review${rating.count > 1 ? 's' : ''})</span>
+                <span class="count">${rating.count.toLocaleString()} review${rating.count > 1 ? 's' : ''}</span>
            </div>`
-        : `<div class="venue-hero-rating"><span class="count" style="color:#9ca3af;">No reviews yet</span></div>`;
+        : `<div class="venue-hero-rating"><span class="count" style="color:#9ca3af;">New venue on Hewrina</span></div>`;
 
-    // Services HTML (Grouped)
-    const services = merchant.services || [];
+    let galleryHTML = '';
+    if (images.length > 0) {
+        const secondaryTiles = Array.from({ length: 4 }, (_, idx) => {
+            const imageUrl = images[idx + 1];
+            if (imageUrl) {
+                return `
+                    <div class="venue-gallery-tile">
+                        <img src="${imageUrl}" alt="${merchant.name}" onerror="this.closest('.venue-gallery-tile').classList.add('is-hidden')">
+                    </div>
+                `;
+            }
+
+            const fallbackLabel = idx === 0
+                ? (merchant.category || 'Venue')
+                : idx === 1
+                    ? (merchant.address || 'Profile details')
+                    : idx === 2
+                        ? `${services.length} service${services.length === 1 ? '' : 's'}`
+                        : `${teamCount || 1} specialist${(teamCount || 1) === 1 ? '' : 's'}`;
+
+            return `
+                <div class="venue-gallery-tile venue-gallery-placeholder">
+                    <span>${fallbackLabel}</span>
+                </div>
+            `;
+        }).join('');
+
+        galleryHTML = `
+            <div id="${getVenueSectionId('photos')}" class="venue-gallery-mosaic ${images.length === 1 ? 'single-photo' : ''}">
+                <div class="venue-gallery-tile venue-gallery-main">
+                    <img src="${images[0]}" alt="${merchant.name}" onerror="this.closest('.venue-gallery-main').innerHTML='<div class=&quot;venue-gallery-placeholder main&quot;><span>${merchant.name}</span></div>'">
+                    <div class="venue-gallery-caption">
+                        <strong>${merchant.name}</strong>
+                        <span>${merchant.category || 'Venue profile'}</span>
+                    </div>
+                </div>
+                ${secondaryTiles}
+                <div class="venue-gallery-count">${images.length} photo${images.length === 1 ? '' : 's'}</div>
+            </div>
+        `;
+    } else {
+        galleryHTML = `
+            <div id="${getVenueSectionId('photos')}" class="venue-gallery-mosaic no-photos">
+                <div class="venue-gallery-tile venue-gallery-main venue-gallery-placeholder main">
+                    <div class="venue-gallery-caption">
+                        <strong>${merchant.name}</strong>
+                        <span>${merchant.category || 'Photo gallery coming soon'}</span>
+                    </div>
+                </div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${merchant.category || 'Venue'}</span></div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${merchant.address || 'Address coming soon'}</span></div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${services.length} services</span></div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${teamCount || 1} specialist${(teamCount || 1) === 1 ? '' : 's'}</span></div>
+            </div>
+        `;
+    }
+
     let servicesHTML = '';
     if (services.length > 0) {
-        // Group by category
         const categorized = {};
-        services.forEach(s => {
-            const cat = s.category || 'Featured Services';
+        services.forEach(service => {
+            const cat = service.category || 'Featured Services';
             if (!categorized[cat]) categorized[cat] = [];
-            categorized[cat].push(s);
+            categorized[cat].push(service);
         });
 
         for (const [catName, catServices] of Object.entries(categorized)) {
-            servicesHTML += `<h3 class="venue-service-category-title">${catName}</h3>`;
-            servicesHTML += catServices.map(s => {
-                const basePrice = Number(s.price) || 0;
-                const serviceOffers = merchantOffers.filter(o => o.serviceName === s.name);
-                const allDayOffers = serviceOffers.filter(o => !isOfferTimeRestricted(o));
-                const timedOffers = serviceOffers.filter(o => isOfferTimeRestricted(o));
-
-                const bestAllDayOffer = allDayOffers.reduce((best, current) => {
-                    const bestDiscount = Number(best?.discountPercent || 0);
-                    const currentDiscount = Number(current?.discountPercent || 0);
-                    return currentDiscount > bestDiscount ? current : best;
-                }, null);
-                const bestTimedOffer = timedOffers.reduce((best, current) => {
-                    const bestDiscount = Number(best?.discountPercent || 0);
-                    const currentDiscount = Number(current?.discountPercent || 0);
-                    return currentDiscount > bestDiscount ? current : best;
-                }, null);
-
-                const hasAllDayOffer = !!bestAllDayOffer;
-                const discountedPrice = hasAllDayOffer ? Math.round(basePrice * (1 - ((Number(bestAllDayOffer.discountPercent) || 0) / 100))) : basePrice;
-                const priceDisplay = hasAllDayOffer
-                    ? `<span class="price-original">${basePrice.toLocaleString()} IQD</span><span class="price">${discountedPrice.toLocaleString()} IQD</span>`
-                    : `<span class="price">${basePrice.toLocaleString()} IQD</span>`;
-
-                const tagHTML = hasAllDayOffer
-                    ? `<span style="color:#ef4444; font-size:0.8rem;">-${bestAllDayOffer.discountPercent}%</span>`
-                    : bestTimedOffer
-                        ? `<span style="color:#ef4444; font-size:0.8rem;">-${bestTimedOffer.discountPercent}% Off-peak</span>`
-                        : '';
-
-                const offPeakHint = !hasAllDayOffer && bestTimedOffer
-                    ? `<span class="service-detail" style="display:block; margin-top: 4px; color:#6b7280;">Valid ${formatOfferHours(bestTimedOffer)}</span>`
-                    : '';
-
-                const serviceJson = encodeURIComponent(JSON.stringify({ name: s.name, price: basePrice, duration: s.duration }));
-                return `
-                    <div class="venue-service-card">
-                        <div class="venue-service-info">
-                            <h4>${s.name} ${tagHTML}</h4>
-                            <span class="service-detail">${s.duration} min</span>
-                            ${offPeakHint}
-                        </div>
-                        <div class="venue-service-price">
-                            ${priceDisplay}
-                            <button class="btn-book-service" onclick="event.stopPropagation(); openBookingFromProfile('${merchant.id}', '${serviceJson}')">Book</button>
+            servicesHTML += `
+                <div class="venue-service-group">
+                    <div class="venue-service-group-head">
+                        <div>
+                            <h3 class="venue-service-category-title">${catName}</h3>
+                            <p>${catServices.length} service${catServices.length === 1 ? '' : 's'}</p>
                         </div>
                     </div>
-                `;
-            }).join('');
+                    <div class="venue-service-list">
+                        ${catServices.map(service => {
+                            const basePrice = Number(service.price) || 0;
+                            const serviceOffers = merchantOffers.filter(offer => offer.serviceName === service.name);
+                            const allDayOffers = serviceOffers.filter(offer => !isOfferTimeRestricted(offer));
+                            const timedOffers = serviceOffers.filter(offer => isOfferTimeRestricted(offer));
+
+                            const bestAllDayOffer = allDayOffers.reduce((best, current) => {
+                                const bestDiscount = Number(best?.discountPercent || 0);
+                                const currentDiscount = Number(current?.discountPercent || 0);
+                                return currentDiscount > bestDiscount ? current : best;
+                            }, null);
+                            const bestTimedOffer = timedOffers.reduce((best, current) => {
+                                const bestDiscount = Number(best?.discountPercent || 0);
+                                const currentDiscount = Number(current?.discountPercent || 0);
+                                return currentDiscount > bestDiscount ? current : best;
+                            }, null);
+
+                            const hasAllDayOffer = !!bestAllDayOffer;
+                            const discountedPrice = hasAllDayOffer
+                                ? Math.round(basePrice * (1 - ((Number(bestAllDayOffer.discountPercent) || 0) / 100)))
+                                : basePrice;
+                            const priceDisplay = hasAllDayOffer
+                                ? `<span class="price-original">${basePrice.toLocaleString()} IQD</span><span class="price">${discountedPrice.toLocaleString()} IQD</span>`
+                                : `<span class="price">${basePrice.toLocaleString()} IQD</span>`;
+
+                            const tagHTML = hasAllDayOffer
+                                ? `<span class="venue-service-tag">-${bestAllDayOffer.discountPercent}%</span>`
+                                : bestTimedOffer
+                                    ? `<span class="venue-service-tag off-peak">-${bestTimedOffer.discountPercent}% Off-peak</span>`
+                                    : '';
+
+                            const offPeakHint = !hasAllDayOffer && bestTimedOffer
+                                ? `<span class="service-detail off-peak">Valid ${formatOfferHours(bestTimedOffer)}</span>`
+                                : '';
+
+                            const serviceJson = encodeURIComponent(JSON.stringify({
+                                name: service.name,
+                                price: basePrice,
+                                duration: service.duration
+                            }));
+
+                            return `
+                                <div class="venue-service-card">
+                                    <div class="venue-service-info">
+                                        <h4>${service.name}</h4>
+                                        <div class="venue-service-meta-line">
+                                            <span class="service-detail">${service.duration} min</span>
+                                            ${tagHTML}
+                                        </div>
+                                        ${offPeakHint}
+                                    </div>
+                                    <div class="venue-service-price">
+                                        ${priceDisplay}
+                                        <button class="btn-book-service" onclick="event.stopPropagation(); openBookingFromProfile('${merchant.id}', '${serviceJson}')">Book</button>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
         }
     } else {
         servicesHTML = '<div class="venue-no-reviews">No services listed yet.</div>';
     }
-
-    // Products / Shop HTML
-    const products = Array.isArray(merchant.products) ? merchant.products : [];
-    const cartItems = syncVenueCartWithProducts(merchant.id, products);
-    const cartTotals = calculateVenueCartTotals(cartItems, products);
 
     const productCardsHTML = products.length > 0
         ? products.map((product, index) => {
@@ -6012,6 +6713,7 @@ function renderVenueProfile(merchant) {
             const unitPrice = Math.max(0, Number(product.price) || 0);
             const lineTotal = unitPrice * item.quantity;
             const stock = Math.max(0, Number(product.stock) || 0);
+
             return `
                 <div class="shop-cart-item">
                     <div class="shop-cart-item-main">
@@ -6030,19 +6732,22 @@ function renderVenueProfile(merchant) {
         }).join('')
         : '<div class="shop-cart-empty">Your cart is empty.</div>';
 
-    // Reviews HTML
     let reviewsHTML = '';
     if (storeReviews.length > 0) {
-        reviewsHTML = storeReviews.slice(0, 10).map(r => {
-            const date = r.createdAt?.toDate ? r.createdAt.toDate() : new Date(r.createdAt);
+        reviewsHTML = storeReviews.slice(0, 6).map(review => {
+            const date = review.createdAt?.toDate ? review.createdAt.toDate() : new Date(review.createdAt);
+            const reviewerName = review.customerName || 'Anonymous';
             return `
-                <div class="review-card">
+                <div class="venue-review-card">
                     <div class="review-card-header">
-                        <span class="reviewer-name">${r.customerName || 'Anonymous'}</span>
+                        <div class="venue-reviewer">
+                            <span class="venue-reviewer-avatar">${getVenueInitials(reviewerName)}</span>
+                            <span class="reviewer-name">${reviewerName}</span>
+                        </div>
                         <span class="review-date">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
                     </div>
-                    <div class="review-stars">${generateStarHTML(r.rating)}</div>
-                    ${r.comment ? `<p class="review-text">${r.comment}</p>` : ''}
+                    <div class="review-stars">${generateStarHTML(review.rating)}</div>
+                    ${review.comment ? `<p class="review-text">${review.comment}</p>` : ''}
                 </div>
             `;
         }).join('');
@@ -6050,71 +6755,232 @@ function renderVenueProfile(merchant) {
         reviewsHTML = '<div class="venue-no-reviews">No reviews yet. Be the first to rate this venue!</div>';
     }
 
-    container.innerHTML = `
-        <button class="venue-back-btn" onclick="closeVenueProfile()">← Back to all venues</button>
-        
-        <div class="venue-hero">
-            ${galleryHTML}
-            <div class="venue-hero-body">
-                <div class="venue-hero-top">
-                    <h1>${merchant.name}</h1>
-                    <span class="venue-hero-tag">${merchant.category}</span>
+    const reviewIntro = rating.count > 0
+        ? `<div class="venue-review-summary-card">
+                <div class="venue-review-score">${rating.avg}</div>
+                <div>
+                    <div class="review-stars">${generateStarHTML(parseFloat(rating.avg))}</div>
+                    <p>Based on ${rating.count.toLocaleString()} review${rating.count > 1 ? 's' : ''}</p>
                 </div>
-                ${ratingHTML}
-                <div class="venue-meta-row">
-                    <span>📍 ${merchant.address}</span>
-                    <span>📏 ${merchant.distance}</span>
-                    ${merchant.lat && merchant.lng ? `<span class="btn-map-link" onclick="showOnMap('${merchant.id}')" style="cursor:pointer; color: var(--primary); font-weight:500;"> View on Map</span>` : ''}
+           </div>`
+        : `<div class="venue-review-summary-card empty"><p>No ratings yet. The first completed visits will appear here.</p></div>`;
+
+    const teamHTML = teamMembers.length > 0 ? `
+        <div id="${getVenueSectionId('team')}" class="venue-section venue-surface-card">
+            <div class="venue-section-heading">
+                <div>
+                    <span class="venue-section-kicker">Team</span>
+                    <h2>Choose your specialist</h2>
                 </div>
+                <button class="venue-inline-link" onclick="openBookingFromProfile('${merchant.id}')">Book any available</button>
+            </div>
+            <div class="venue-team-grid">
+                ${teamMembers.map(member => {
+                    const avatar = member.image
+                        ? `<img src="${member.image}" alt="${member.name}" onerror="this.closest('.venue-team-avatar').innerHTML='<span>${getVenueInitials(member.name)}</span>'">`
+                        : `<span>${getVenueInitials(member.name)}</span>`;
+                    const cta = canPreselectStaff && member.id !== 'solo-worker'
+                        ? `openBookingForStaff('${merchant.id}', '${member.id}')`
+                        : `openBookingFromProfile('${merchant.id}')`;
+                    return `
+                        <div class="venue-team-card">
+                            <div class="venue-team-avatar">${avatar}</div>
+                            <div class="venue-team-content">
+                                <h3>${member.name}</h3>
+                                <p>${member.role || 'Team Member'}</p>
+                            </div>
+                            <button class="btn-outline" onclick="${cta}">Book with ${member.name.split(' ')[0]}</button>
+                        </div>
+                    `;
+                }).join('')}
             </div>
         </div>
+    ` : '';
 
-        <div class="venue-profile-tabs">
-            <button class="venue-profile-tab ${activeTab === 'services' ? 'active' : ''}" onclick="switchVenueTab('services')">Services (${services.length})</button>
-            <button class="venue-profile-tab ${activeTab === 'shop' ? 'active' : ''}" onclick="switchVenueTab('shop')">Shop (${products.length})</button>
-            <button class="venue-profile-tab ${activeTab === 'reviews' ? 'active' : ''}" onclick="switchVenueTab('reviews')">Reviews (${storeReviews.length})</button>
-        </div>
+    const aboutFacts = [
+        merchant.category || null,
+        services.length ? `${services.length} bookable service${services.length === 1 ? '' : 's'}` : null,
+        teamCount ? `${teamCount} specialist${teamCount === 1 ? '' : 's'}` : null,
+        products.length ? `${products.length} retail product${products.length === 1 ? '' : 's'}` : null,
+        merchantCoords ? 'Interactive map and directions' : null,
+        merchant.cancellationPolicy ? 'Cancellation policy shown before confirmation' : null
+    ].filter(Boolean);
 
-        <div class="venue-section" style="${activeTab === 'services' ? '' : 'display:none;'}">
-            <h2>Services (${services.length})</h2>
-            ${servicesHTML}
-        </div>
-
-        <div class="venue-section" style="${activeTab === 'shop' ? '' : 'display:none;'}">
-            <h2>Shop (${products.length})</h2>
-            <div class="venue-shop-layout">
-                <div class="venue-shop-grid">
-                    ${productCardsHTML}
+    const locationSectionHTML = merchantCoords ? `
+        <div id="${getVenueSectionId('location')}" class="venue-section venue-surface-card venue-location-section">
+            <div class="venue-section-heading">
+                <div>
+                    <span class="venue-section-kicker">Location</span>
+                    <h2>Visit the store</h2>
                 </div>
-                <div class="venue-shop-cart">
-                    <h3>Cart (${cartTotals.totalItems})</h3>
-                    <div class="shop-cart-list">${cartListHTML}</div>
-                    <div class="shop-cart-summary">
-                        <div><span>Subtotal</span><strong>${cartTotals.subtotal.toLocaleString()} IQD</strong></div>
+            </div>
+            <div class="venue-location-grid">
+                <div class="venue-location-copy">
+                    <div class="venue-location-address">${merchant.address || 'Address not provided yet.'}</div>
+                    <div class="venue-location-coords">Lat ${merchantCoords.lat.toFixed(6)} • Lng ${merchantCoords.lng.toFixed(6)}</div>
+                    <div class="venue-location-actions">
+                        <button class="btn-primary" onclick="showOnMap('${merchant.id}')">Open Interactive Map</button>
+                        <a class="btn-outline" href="${directionsUrl}" target="_blank" rel="noopener noreferrer">Directions</a>
                     </div>
-                    <button class="btn-primary full-width" onclick="checkoutShopCart('${merchant.id}')" ${cartItems.length === 0 ? 'disabled' : ''}>
-                        Checkout
-                    </button>
                 </div>
+                <div id="venue-profile-mini-map" class="venue-profile-mini-map"></div>
             </div>
         </div>
-
-        <div class="venue-section" style="${activeTab === 'reviews' ? '' : 'display:none;'}">
-            <h2>Reviews (${storeReviews.length})</h2>
-            <div class="venue-reviews-list">
-                ${reviewsHTML}
+    ` : `
+        <div id="${getVenueSectionId('location')}" class="venue-section venue-surface-card venue-location-section">
+            <div class="venue-section-heading">
+                <div>
+                    <span class="venue-section-kicker">Location</span>
+                    <h2>Visit the store</h2>
+                </div>
             </div>
+            <div class="venue-mini-map-fallback">This store has not added a map location yet.</div>
         </div>
     `;
 
-    // Hide customer dashboard, show venue profile
+    const sectionButtons = [
+        { key: 'services', label: `Services (${services.length})` },
+        ...(teamMembers.length > 0 ? [{ key: 'team', label: `Team (${teamMembers.length})` }] : []),
+        ...(products.length > 0 ? [{ key: 'shop', label: `Shop (${products.length})` }] : []),
+        { key: 'reviews', label: `Reviews (${storeReviews.length})` },
+        { key: 'about', label: 'About' },
+        { key: 'location', label: 'Location' }
+    ];
+
+    container.innerHTML = `
+        <button class="venue-back-btn" onclick="closeVenueProfile()">← Back to all venues</button>
+
+        <div class="venue-profile-shell">
+            ${galleryHTML}
+
+            <div class="venue-summary-card">
+                <div class="venue-summary-main">
+                    <div class="venue-summary-chips">
+                        <span class="venue-summary-chip primary">${merchant.category || 'Venue'}</span>
+                        ${merchant.distance ? `<span class="venue-summary-chip">${merchant.distance}</span>` : ''}
+                        ${services.length ? `<span class="venue-summary-chip">${services.length} service${services.length === 1 ? '' : 's'}</span>` : ''}
+                        ${teamCount ? `<span class="venue-summary-chip">${teamCount} specialist${teamCount === 1 ? '' : 's'}</span>` : ''}
+                    </div>
+                    <h1>${merchant.name}</h1>
+                    ${ratingHTML}
+                    <div class="venue-meta-row">
+                        ${merchant.address ? `<span>📍 ${merchant.address}</span>` : ''}
+                        ${merchantCoords ? `<span class="btn-map-link" onclick="showOnMap('${merchant.id}')">View on Map</span>` : ''}
+                    </div>
+                    <p class="venue-summary-copy">${aboutText || aboutFallback}</p>
+                </div>
+
+                <div class="venue-summary-side">
+                    <div class="venue-booking-card">
+                        <div class="venue-booking-card-head">
+                            <span>Book online</span>
+                            <strong>${merchant.name}</strong>
+                        </div>
+                        <div class="venue-booking-stats">
+                            <div><strong>${services.length || 0}</strong><span>Services</span></div>
+                            <div><strong>${teamCount || 1}</strong><span>${(teamCount || 1) === 1 ? 'Specialist' : 'Specialists'}</span></div>
+                            <div><strong>${rating.count > 0 ? rating.avg : 'New'}</strong><span>Rating</span></div>
+                        </div>
+                        <button class="btn-primary full-width" onclick="openBookingFromProfile('${merchant.id}')">Book now</button>
+                        ${merchantCoords ? `<a class="btn-outline full-width venue-directions-btn" href="${directionsUrl}" target="_blank" rel="noopener noreferrer">Get directions</a>` : ''}
+                        ${merchant.cancellationPolicy ? `<p class="venue-booking-note">${merchant.cancellationPolicy}</p>` : `<p class="venue-booking-note">Choose a service, pick a worker when available, and confirm your appointment in a few steps.</p>`}
+                    </div>
+                </div>
+            </div>
+
+            <div class="venue-profile-tabs">
+                ${sectionButtons.map(section => `
+                    <button class="venue-profile-tab ${activeTab === section.key ? 'active' : ''}" onclick="switchVenueTab('${section.key}')">${section.label}</button>
+                `).join('')}
+            </div>
+
+            <div id="${getVenueSectionId('services')}" class="venue-section venue-surface-card">
+                <div class="venue-section-heading">
+                    <div>
+                        <span class="venue-section-kicker">Services</span>
+                        <h2>Book a treatment</h2>
+                    </div>
+                </div>
+                ${servicesHTML}
+            </div>
+
+            ${teamHTML}
+
+            ${products.length > 0 ? `
+                <div id="${getVenueSectionId('shop')}" class="venue-section venue-surface-card">
+                    <div class="venue-section-heading">
+                        <div>
+                            <span class="venue-section-kicker">Shop</span>
+                            <h2>Retail products</h2>
+                        </div>
+                    </div>
+                    <div class="venue-shop-layout">
+                        <div class="venue-shop-grid">
+                            ${productCardsHTML}
+                        </div>
+                        <div class="venue-shop-cart">
+                            <h3>Cart (${cartTotals.totalItems})</h3>
+                            <div class="shop-cart-list">${cartListHTML}</div>
+                            <div class="shop-cart-summary">
+                                <div><span>Subtotal</span><strong>${cartTotals.subtotal.toLocaleString()} IQD</strong></div>
+                            </div>
+                            <button class="btn-primary full-width" onclick="checkoutShopCart('${merchant.id}')" ${cartItems.length === 0 ? 'disabled' : ''}>
+                                Checkout
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ` : ''}
+
+            <div id="${getVenueSectionId('reviews')}" class="venue-section venue-surface-card">
+                <div class="venue-section-heading">
+                    <div>
+                        <span class="venue-section-kicker">Reviews</span>
+                        <h2>What customers say</h2>
+                    </div>
+                </div>
+                ${reviewIntro}
+                <div class="venue-reviews-list">
+                    ${reviewsHTML}
+                </div>
+            </div>
+
+            <div id="${getVenueSectionId('about')}" class="venue-section venue-surface-card">
+                <div class="venue-section-heading">
+                    <div>
+                        <span class="venue-section-kicker">About</span>
+                        <h2>Venue details</h2>
+                    </div>
+                </div>
+                <div class="venue-about-grid">
+                    <div class="venue-about-copy">
+                        <p>${aboutText || aboutFallback}</p>
+                    </div>
+                    <div class="venue-about-facts">
+                        ${aboutFacts.map(item => `<span class="venue-about-pill">${item}</span>`).join('')}
+                    </div>
+                </div>
+            </div>
+
+            ${locationSectionHTML}
+        </div>
+    `;
+
     document.getElementById('dashboard-customer').style.display = 'none';
     document.getElementById('venue-profile-view').style.display = 'block';
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    renderVenueProfileMiniMap(merchant);
+
+    if (options.focusSection) {
+        requestAnimationFrame(() => scrollVenueProfileSection(options.focusSection));
+    } else if (!options.preserveScroll) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
 }
 
 window.closeVenueProfile = function() {
     currentVenueProfileMerchantId = null;
+    venueProfileMap = null;
+    venueProfileMapMarker = null;
     document.getElementById('venue-profile-view').style.display = 'none';
     document.getElementById('dashboard-customer').style.display = 'block';
 };
@@ -6149,11 +7015,24 @@ window.openBookingFromProfile = function(merchantId, preselectedServiceJson = nu
         time: null,
         step: 1,
         bookedSlots: null,
-        policyAgreed: false
+        policyAgreed: false,
+        autoAssignSeed: null
     };
 
     renderBookingWizard();
     document.getElementById('booking-modal').style.display = 'flex';
+};
+
+window.openBookingForStaff = function(merchantId, staffId) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+
+    openBookingFromProfile(merchantId);
+    const selectedStaff = getBookableStaffOptions(merchant).find(member => member.id === staffId);
+    if (!selectedStaff) return;
+
+    bookingState.selectedStaff = selectedStaff;
+    renderBookingWizard();
 };
 
 // ========== CONTACT FORM ==========

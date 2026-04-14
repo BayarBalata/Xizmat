@@ -5,10 +5,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hewrina - Beauty Salon & Center Booking</title>
-    <link rel="stylesheet" href="style.css?v=1.4">
+    <link rel="stylesheet" href="style.css?v=1.5">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script type="module" src="firebase-config.js"></script>
-    <script type="module" src="app.js?v=3.6"></script>
+    <script type="module" src="app.js?v=3.7"></script>
     <!-- Google Maps API -->
     <script async defer
         src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAfPTJjw9HiF5yc99hn3SyRSpNVfB2wmMk&callback=initMapCallback"></script>
@@ -66,91 +66,417 @@
 
     <!-- CUSTOMER DASHBOARD -->
     <main id="dashboard-customer">
-        <section id="home" class="hero serenity-hero">
-            <div class="hero-bg-overlay"></div>
+        <section id="home" class="hero serenity-hero home-hero">
+            <div class="home-hero-gradient"></div>
+            <div class="home-hero-grid-lines"></div>
 
-            <div class="photo-slider-wrapper">
-                <div class="photo-slider-track">
-                    <img src="https://images.unsplash.com/photo-1560066984-138dadb4c035?auto=format&fit=crop&w=1200&q=80"
-                        alt="Spa Resort">
-                    <img src="https://images.unsplash.com/photo-1516975080661-46bfa20281ba?auto=format&fit=crop&w=1200&q=80"
-                        alt="Nail Art">
-                    <img src="https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=1200&q=80"
-                        alt="Hair Salon">
-                    <img src="https://images.unsplash.com/photo-1600948836101-f9ff169a1c1b?auto=format&fit=crop&w=1200&q=80"
-                        alt="Luxury Spa">
-                    <img src="https://images.unsplash.com/photo-1596178065887-1198b6148b2b?auto=format&fit=crop&w=1200&q=80"
-                        alt="Skincare">
-                    <img src="https://images.unsplash.com/photo-1522337660859-02fbefca4702?auto=format&fit=crop&w=1200&q=80"
-                        alt="Beauty Products">
+            <div class="container home-hero-grid">
+                <div class="home-hero-copy" data-reveal>
+                    <div class="home-eyebrow">Local self-care booking</div>
+                    <h1>Book beauty, barber and wellness services without the back-and-forth.</h1>
+                    <p class="home-hero-lead">
+                        Search treatments, compare store profiles, choose the right worker, review live offers and lock in a time from one place.
+                    </p>
+
+                    <div class="home-hero-stats">
+                        <div class="home-stat-card">
+                            <strong id="home-stat-venues">0</strong>
+                            <span>venues live</span>
+                        </div>
+                        <div class="home-stat-card">
+                            <strong id="home-stat-services">0</strong>
+                            <span>services listed</span>
+                        </div>
+                        <div class="home-stat-card">
+                            <strong id="home-stat-reviews">0</strong>
+                            <span>customer reviews</span>
+                        </div>
+                        <div class="home-stat-card">
+                            <strong id="home-stat-offers">0</strong>
+                            <span>live offers</span>
+                        </div>
+                    </div>
+
+                    <div class="enhanced-search-bar home-search-shell">
+                        <div class="search-field">
+                            <label>Treatment</label>
+                            <input type="text" id="search-treatment" placeholder="Haircut, facial, nails..." oninput="performSearch()">
+                        </div>
+                        <div class="search-divider"></div>
+                        <div class="search-field">
+                            <label>Category</label>
+                            <select id="search-category" onchange="performSearch()">
+                                <option value="all">All Categories</option>
+                                <option value="Hair Salon">Hair Salon</option>
+                                <option value="Nail Salon">Nail Salon</option>
+                                <option value="Barber Shop">Barber Shop</option>
+                                <option value="Aesthetics">Aesthetics</option>
+                                <option value="Skin Care">Skin Care</option>
+                                <option value="Laser Center">Laser Center</option>
+                                <option value="Makeup Studio">Makeup Studio</option>
+                                <option value="Brows & Lashes">Brows & Lashes</option>
+                            </select>
+                        </div>
+                        <div class="search-divider"></div>
+                        <div class="search-field">
+                            <label>Sort By</label>
+                            <select id="search-sort" onchange="performSearch()">
+                                <option value="default">Default</option>
+                                <option value="rating">Highest Rated</option>
+                                <option value="reviews">Most Reviews</option>
+                                <option value="nearest">Nearest</option>
+                            </select>
+                        </div>
+                        <button class="btn-search-enhanced" onclick="performSearch()">🔍</button>
+                    </div>
+
+                    <div class="hero-actions home-hero-actions">
+                        <button class="btn-primary" onclick="document.getElementById('explore').scrollIntoView({behavior: 'smooth'})">
+                            Explore venues
+                        </button>
+                        <button class="btn-outline home-ghost-btn" onclick="openServiceSearch()">
+                            Find a service
+                        </button>
+                    </div>
+
+                    <div class="home-trust-chips">
+                        <span>Choose the worker you want</span>
+                        <span>Live offers and off-peak deals</span>
+                        <span>Store map and directions</span>
+                        <span>Owner and admin dashboards</span>
+                    </div>
+                </div>
+
+                <div class="home-hero-visual" data-reveal>
+                    <div class="hero-visual-orb orb-a"></div>
+                    <div class="hero-visual-orb orb-b"></div>
+
+                    <div class="hero-browser-card hero-browser-main hero-signal-panel">
+                        <div class="hero-browser-top">
+                            <span></span><span></span><span></span>
+                        </div>
+                        <div class="hero-panel-body">
+                            <div class="hero-panel-kicker">For customers</div>
+                            <h3>Venue profile signals</h3>
+                            <div class="hero-service-pills">
+                                <span>Haircut</span>
+                                <span>Skin care</span>
+                                <span>Barbering</span>
+                                <span>Brows</span>
+                            </div>
+                            <div class="hero-availability-strip">
+                                <div class="hero-availability-label">Today</div>
+                                <div class="hero-availability-times">
+                                    <span>10:00</span>
+                                    <span>11:30</span>
+                                    <span>13:00</span>
+                                </div>
+                            </div>
+                            <div class="hero-worker-row">
+                                <div class="hero-worker-pill">
+                                    <strong>RA</strong>
+                                    <span>Senior stylist</span>
+                                </div>
+                                <div class="hero-worker-pill">
+                                    <strong>NO</strong>
+                                    <span>Skin specialist</span>
+                                </div>
+                                <div class="hero-worker-pill">
+                                    <strong>AL</strong>
+                                    <span>Barber</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="hero-visual-tag primary">Customer booking flow</div>
+                    </div>
+
+                    <div class="hero-browser-card hero-browser-side hero-owner-panel">
+                        <div class="hero-browser-top">
+                            <span></span><span></span><span></span>
+                        </div>
+                        <div class="hero-panel-body compact">
+                            <div class="hero-panel-kicker">For owners</div>
+                            <h3>Daily controls</h3>
+                            <div class="hero-mini-stats">
+                                <div><strong>24</strong><span>Bookings</span></div>
+                                <div><strong>6</strong><span>Orders</span></div>
+                                <div><strong>4</strong><span>Offers</span></div>
+                            </div>
+                            <div class="hero-owner-list">
+                                <div><span>Schedule</span><strong>Updated</strong></div>
+                                <div><span>Team</span><strong>3 active</strong></div>
+                                <div><span>Map pin</span><strong>Live</strong></div>
+                            </div>
+                        </div>
+                        <div class="hero-visual-tag secondary">Owner controls</div>
+                    </div>
+
+                    <div class="hero-phone-card hero-mobile-panel">
+                        <div class="hero-mobile-notch"></div>
+                        <div class="hero-mobile-body">
+                            <div class="hero-mobile-step active">
+                                <span>01</span>
+                                <strong>Choose service</strong>
+                            </div>
+                            <div class="hero-mobile-step active">
+                                <span>02</span>
+                                <strong>Select worker</strong>
+                            </div>
+                            <div class="hero-mobile-step">
+                                <span>03</span>
+                                <strong>Confirm time</strong>
+                            </div>
+                            <div class="hero-mobile-cta">Book now</div>
+                        </div>
+                    </div>
                 </div>
             </div>
+        </section>
 
-            <div class="container hero-content" style="position: relative; z-index: 3;">
-                <div class="hero-icon" style="font-size: 2rem; color: #fcd2db; margin-bottom: 10px;"></div>
-                <h4 style="color: #fcd2db; margin-bottom: 15px; font-weight: 500;">Discover Your Natural Beauty
-                </h4>
-                <h1
-                    style="font-size: 3.5rem; color: #ffffff; margin-bottom: 20px; max-width: 800px; margin-left: auto; margin-right: auto; line-height: 1.2;">
-                    Experience luxury treatments and personalized care in our tranquil sanctuary.</h1>
-                <p style="font-size: 1.2rem; color: rgba(255,255,255,0.7); margin-bottom: 40px;">
-                    Where beauty meets
-                    wellness.</p>
-
-                <div class="hero-actions"
-                    style="display: flex; gap: 20px; justify-content: center; margin-bottom: 40px; margin-top: 40px;">
-                    <button class="btn-primary"
-                        onclick="document.getElementById('explore').scrollIntoView({behavior: 'smooth'})">Book
-                        Appointment</button>
-                    <button class="btn-outline" style="background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.5); color: white; backdrop-filter: blur(4px);"
-                        onclick="openServiceSearch()"> Find a Service</button>
+        <section class="home-showcase-section">
+            <div class="container home-showcase-grid">
+                <div class="home-section-copy" data-reveal>
+                    <div class="home-eyebrow dark">Website experience</div>
+                    <h2>Preview the full booking journey in the browser.</h2>
+                    <p>
+                        Hewrina does not rely on a mobile app. The product lives on the web, so customers, owners and admins all work from responsive screens that match the real product.
+                    </p>
+                    <div class="home-feature-list">
+                        <div class="home-feature-item">
+                            <strong>Store profiles built for comparison</strong>
+                            <span>Photos, workers, services, reviews, shop items and directions in one place.</span>
+                        </div>
+                        <div class="home-feature-item">
+                            <strong>Booking flow with worker selection</strong>
+                            <span>Customers can choose services, lock a worker, review time slots and confirm without confusion.</span>
+                        </div>
+                        <div class="home-feature-item">
+                            <strong>Operations for owners and admins</strong>
+                            <span>Dashboards cover bookings, offers, orders, stores, sponsors and financial visibility.</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="enhanced-search-bar">
-                    <div class="search-field">
-                        <label>Treatment</label>
-                        <input type="text" id="search-treatment" placeholder="e.g. Haircut, Facial, Nails..." oninput="performSearch()">
-                    </div>
-                    <div class="search-divider"></div>
-                    <div class="search-field">
-                        <label>Category</label>
-                        <select id="search-category" onchange="performSearch()">
-                            <option value="all">All Categories</option>
-                            <option value="Hair Salon">Hair Salon</option>
-                            <option value="Nail Salon">Nail Salon</option>
-                            <option value="Barber Shop">Barber Shop</option>
-                            <option value="Aesthetics">Aesthetics</option>
-                            <option value="Skin Care">Skin Care</option>
-                            <option value="Laser Center">Laser Center</option>
-                            <option value="Makeup Studio">Makeup Studio</option>
-                            <option value="Brows & Lashes">Brows & Lashes</option>
-                        </select>
-                    </div>
-                    <div class="search-divider"></div>
-                    <div class="search-field">
-                        <label>Sort By</label>
-                        <select id="search-sort" onchange="performSearch()">
-                            <option value="default">Default</option>
-                            <option value="rating">Highest Rated</option>
-                            <option value="reviews">Most Reviews</option>
-                            <option value="nearest">Nearest</option>
-                        </select>
-                    </div>
-                    <button class="btn-search-enhanced" onclick="performSearch()">🔍</button>
+
+                <div class="home-shot-wall" data-reveal>
+                    <article class="home-shot-card large abstract">
+                        <div class="home-shot-visual venue">
+                            <div class="home-shot-header">
+                                <span>Venue profile</span>
+                                <strong>Live now</strong>
+                            </div>
+                            <div class="home-shot-chip-row">
+                                <span>4.9 rating</span>
+                                <span>3 workers</span>
+                                <span>Map ready</span>
+                            </div>
+                            <div class="home-shot-list">
+                                <div><span>Haircut & style</span><strong>25,000 IQD</strong></div>
+                                <div><span>Beard trim</span><strong>15,000 IQD</strong></div>
+                                <div><span>Express facial</span><strong>30,000 IQD</strong></div>
+                            </div>
+                        </div>
+                        <div class="home-shot-copy">
+                            <strong>Service selection</strong>
+                            <span>Customers can scan the offer quickly without opening separate pages or asking for details manually.</span>
+                        </div>
+                    </article>
+                    <article class="home-shot-card abstract">
+                        <div class="home-shot-visual slots">
+                            <div class="home-slot-grid">
+                                <span>10:00</span>
+                                <span>10:30</span>
+                                <span class="busy">11:00</span>
+                                <span>11:30</span>
+                                <span>12:00</span>
+                                <span class="busy">12:30</span>
+                            </div>
+                        </div>
+                        <div class="home-shot-copy">
+                            <strong>Time slots</strong>
+                            <span>Availability updates as customers move through the flow.</span>
+                        </div>
+                    </article>
+                    <article class="home-shot-card abstract">
+                        <div class="home-shot-visual admin">
+                            <div class="home-admin-tags">
+                                <span>Stores</span>
+                                <span>Offers</span>
+                                <span>Orders</span>
+                                <span>Sponsors</span>
+                            </div>
+                            <div class="home-admin-bars">
+                                <i></i><i></i><i></i>
+                            </div>
+                        </div>
+                        <div class="home-shot-copy">
+                            <strong>Admin workspace</strong>
+                            <span>Moderate stores and platform activity from one place.</span>
+                        </div>
+                    </article>
                 </div>
             </div>
         </section>
         <!-- SPONSOR BANNER AREA -->
         <section id="sponsor-banner" class="sponsor-section">
             <div class="container">
+                <div class="home-section-heading compact" data-reveal>
+                    <div>
+                        <div class="home-eyebrow dark">Featured</div>
+                        <h2>Sponsored placements and highlighted stores</h2>
+                    </div>
+                    <p>Premium visibility for stores that want more discovery on the home page.</p>
+                </div>
                 <div class="sponsor-carousel" id="sponsor-carousel">
                     <!-- Sponsors loaded via JS -->
                 </div>
             </div>
         </section>
+
+        <section class="home-proof-section">
+            <div class="container">
+                <div class="home-section-heading" data-reveal>
+                    <div>
+                        <div class="home-eyebrow dark">What stands out</div>
+                        <h2>A cleaner flow for customers and a tighter operation for owners.</h2>
+                    </div>
+                </div>
+
+                <div class="home-proof-grid">
+                    <article class="home-proof-card" data-reveal>
+                        <div class="home-proof-stars">★★★★★</div>
+                        <h3>Booking feels direct</h3>
+                        <p>Customers can move from discovery to booking without switching channels or waiting for replies.</p>
+                        <span>Customer perspective</span>
+                    </article>
+                    <article class="home-proof-card" data-reveal>
+                        <div class="home-proof-stars">★★★★★</div>
+                        <h3>Store profiles do the explaining</h3>
+                        <p>Photos, services, workers and maps reduce the back-and-forth a store owner usually handles manually.</p>
+                        <span>Store owner perspective</span>
+                    </article>
+                    <article class="home-proof-card" data-reveal>
+                        <div class="home-proof-stars">★★★★★</div>
+                        <h3>Operations stay visible</h3>
+                        <p>Bookings, orders, offers and admin controls stay within one consistent system instead of being split across tools.</p>
+                        <span>Platform perspective</span>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section class="home-business-section">
+            <div class="container home-business-grid">
+                <div class="home-business-visual" data-reveal>
+                    <div class="home-dashboard-frame abstract">
+                        <div class="home-board-top">
+                            <div class="home-board-badge">Operations board</div>
+                            <div class="home-board-status">Live</div>
+                        </div>
+                        <div class="home-board-stats">
+                            <div><strong>12</strong><span>Pending</span></div>
+                            <div><strong>39</strong><span>Completed</span></div>
+                            <div><strong>4.8</strong><span>Avg rating</span></div>
+                        </div>
+                        <div class="home-board-columns">
+                            <div class="home-board-column">
+                                <span>Bookings</span>
+                                <i></i><i></i><i></i>
+                            </div>
+                            <div class="home-board-column">
+                                <span>Products</span>
+                                <i></i><i></i><i></i>
+                            </div>
+                            <div class="home-board-column">
+                                <span>Offers</span>
+                                <i></i><i></i><i></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="home-section-copy" data-reveal>
+                    <div class="home-eyebrow dark">For business</div>
+                    <h2>Built for stores that need more than a brochure site.</h2>
+                    <p>
+                        Hewrina is positioned as a booking and operations platform. Owners can manage services, staff, products, offers and orders while the customer-facing experience stays polished.
+                    </p>
+                    <div class="home-feature-list compact">
+                        <div class="home-feature-item">
+                            <strong>Store setup and editing</strong>
+                            <span>Manage photos, workers, services, policies and location from the owner dashboard.</span>
+                        </div>
+                        <div class="home-feature-item">
+                            <strong>Retail and order handling</strong>
+                            <span>Products, cart checkout and stock movement all live inside the same store profile.</span>
+                        </div>
+                        <div class="home-feature-item">
+                            <strong>Platform governance</strong>
+                            <span>Admins can review stores, manage sponsor placements and monitor financial activity.</span>
+                        </div>
+                    </div>
+                    <div class="home-business-actions">
+                        <a href="contact.html" class="btn-primary">Talk to the team</a>
+                        <button class="btn-outline" onclick="document.getElementById('explore').scrollIntoView({behavior: 'smooth'})">Browse live venues</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="home-categories-section">
+            <div class="container">
+                <div class="home-section-heading" data-reveal>
+                    <div>
+                        <div class="home-eyebrow dark">Popular categories</div>
+                        <h2>Start with the type of service you want.</h2>
+                    </div>
+                    <p>Each card applies a real filter and jumps straight into discovery.</p>
+                </div>
+
+                <div class="home-category-grid">
+                    <article class="home-category-card" data-reveal>
+                        <div class="home-category-icon">✂️</div>
+                        <h3>Hair salons</h3>
+                        <p>Cut, color and styling services with richer store profiles.</p>
+                        <button class="btn-outline" onclick="quickSearchCategory('Hair Salon')">Browse</button>
+                    </article>
+                    <article class="home-category-card" data-reveal>
+                        <div class="home-category-icon">💈</div>
+                        <h3>Barber shops</h3>
+                        <p>Choose a barber, compare services and book a time faster.</p>
+                        <button class="btn-outline" onclick="quickSearchCategory('Barber Shop')">Browse</button>
+                    </article>
+                    <article class="home-category-card" data-reveal>
+                        <div class="home-category-icon">💅</div>
+                        <h3>Nail salons</h3>
+                        <p>Discover manicure and pedicure services with offer visibility.</p>
+                        <button class="btn-outline" onclick="quickSearchCategory('Nail Salon')">Browse</button>
+                    </article>
+                    <article class="home-category-card" data-reveal>
+                        <div class="home-category-icon">✨</div>
+                        <h3>Aesthetics</h3>
+                        <p>Service menus, policies and location details in one view.</p>
+                        <button class="btn-outline" onclick="quickSearchCategory('Aesthetics')">Browse</button>
+                    </article>
+                    <article class="home-category-card" data-reveal>
+                        <div class="home-category-icon">🧴</div>
+                        <h3>Skin care</h3>
+                        <p>Compare treatments and understand the venue before booking.</p>
+                        <button class="btn-outline" onclick="quickSearchCategory('Skin Care')">Browse</button>
+                    </article>
+                    <article class="home-category-card" data-reveal>
+                        <div class="home-category-icon">🪞</div>
+                        <h3>Brows & lashes</h3>
+                        <p>Quick category-driven discovery for detail-focused services.</p>
+                        <button class="btn-outline" onclick="quickSearchCategory('Brows & Lashes')">Browse</button>
+                    </article>
+                </div>
+            </div>
+        </section>
+
         <section id="explore" class="content-section">
             <div class="container">
                 <div class="section-header">
-                    <h2>Top Rated Venues</h2>
+                    <h2>Explore live venues</h2>
                     <div class="filters">
                         <button class="filter-chip active" data-type="all">All</button>
                         <button class="filter-chip" data-type="salon">Salons</button>
@@ -1216,7 +1542,7 @@
                         <strong>From:</strong>
                         <p>Hewrina Platform</p>
                         <p>Erbil, Kurdistan Region, Iraq</p>
-                        <p>hello@hewrina.com</p>
+                        <p>info@hewrina.com</p>
                     </div>
                     <div class="invoice-to">
                         <strong>Bill To:</strong>
