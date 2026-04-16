@@ -669,9 +669,9 @@
                             <input type="text" id="owner-store-address" required>
                         </div>
                         <div class="form-group">
-                            <label> Number of Workers / Stylists</label>
-                            <input type="number" id="owner-store-workers" min="1" max="50" value="1" required>
-                            <small style="color: #666; margin-top: 4px; display: block;">How many staff can serve customers at the same time</small>
+                            <label> Active Workers / Stylists</label>
+                            <input type="number" id="owner-store-workers" min="1" max="50" value="1" readonly>
+                            <small style="color: #666; margin-top: 4px; display: block;">This count is managed automatically from the staff list below.</small>
                         </div>
                         <div class="form-group">
                             <label>Cancellation & No-Show Policy</label>
@@ -788,12 +788,170 @@
 
             <!-- Admin Tabs -->
             <div class="admin-tabs">
-                <button class="admin-tab active" data-tab="stores"> Stores</button>
+                <button class="admin-tab active" data-tab="analytics"> Analytics</button>
+                <button class="admin-tab" data-tab="stores"> Stores</button>
                 <button class="admin-tab" data-tab="offers"> Offers</button>
                 <button class="admin-tab" data-tab="sponsors"> Sponsors</button>
                 <button class="admin-tab" data-tab="orders"> Orders</button>
                 <button class="admin-tab" data-tab="financials"> Financials</button>
                 <button class="admin-tab" data-tab="users"> Users</button>
+            </div>
+
+            <!-- ANALYTICS TAB -->
+            <div id="admin-analytics" class="admin-panel">
+                <div class="panel-header analytics-panel-header">
+                    <div>
+                        <h2>Platform Analytics</h2>
+                        <p class="panel-subtitle">Sponsor-facing performance, audience, and commercial signals across Hewrina.</p>
+                    </div>
+                    <div class="financial-filters analytics-filters">
+                        <button class="filter-btn analytics-filter-btn active" data-range="90d" onclick="setAdminAnalyticsRange('90d')">Last 90 Days</button>
+                        <button class="filter-btn analytics-filter-btn" data-range="30d" onclick="setAdminAnalyticsRange('30d')">Last 30 Days</button>
+                        <button class="filter-btn analytics-filter-btn" data-range="all" onclick="setAdminAnalyticsRange('all')">All Time</button>
+                    </div>
+                </div>
+
+                <div class="analytics-hero">
+                    <div class="analytics-hero-copy">
+                        <span class="analytics-kicker">Sponsor Snapshot</span>
+                        <h3 id="analytics-headline">Loading platform analytics...</h3>
+                        <p id="analytics-subheadline">Preparing venue, customer, and booking insights for sponsorship conversations.</p>
+                    </div>
+                    <div class="analytics-hero-actions">
+                        <button class="btn-outline" onclick="loadAdminAnalytics()">Refresh Data</button>
+                    </div>
+                </div>
+
+                <div class="financial-stats analytics-stats">
+                    <div class="financial-stat-card">
+                        <span class="stat-label">Active Venues</span>
+                        <span class="stat-value" id="analytics-stat-venues">0</span>
+                        <span class="stat-trend">Stores available for promotion</span>
+                    </div>
+                    <div class="financial-stat-card highlight">
+                        <span class="stat-label">Customer Base</span>
+                        <span class="stat-value" id="analytics-stat-customers">0</span>
+                        <span class="stat-trend">Registered customers on platform</span>
+                    </div>
+                    <div class="financial-stat-card">
+                        <span class="stat-label">Completed Bookings</span>
+                        <span class="stat-value" id="analytics-stat-bookings">0</span>
+                        <span class="stat-trend">Appointments successfully completed</span>
+                    </div>
+                    <div class="financial-stat-card warning">
+                        <span class="stat-label">Platform Revenue</span>
+                        <span class="stat-value" id="analytics-stat-revenue">0 IQD</span>
+                        <span class="stat-trend">Gross completed booking value</span>
+                    </div>
+                    <div class="financial-stat-card">
+                        <span class="stat-label">Average Rating</span>
+                        <span class="stat-value" id="analytics-stat-rating">0.0</span>
+                        <span class="stat-trend" id="analytics-stat-rating-meta">From platform reviews</span>
+                    </div>
+                    <div class="financial-stat-card">
+                        <span class="stat-label">Repeat Customer Rate</span>
+                        <span class="stat-value" id="analytics-stat-repeat">0%</span>
+                        <span class="stat-trend">Customers with 2+ completed visits</span>
+                    </div>
+                </div>
+
+                <div class="analytics-grid analytics-story-grid">
+                    <div class="analytics-card">
+                        <div class="analytics-card-head">
+                            <h3>Audience Summary</h3>
+                            <p>What a sponsor is actually buying access to.</p>
+                        </div>
+                        <div id="analytics-audience-list" class="analytics-mini-list">
+                            <div class="analytics-empty">Loading audience summary...</div>
+                        </div>
+                    </div>
+                    <div class="analytics-card">
+                        <div class="analytics-card-head">
+                            <h3>Commercial Snapshot</h3>
+                            <p>Signals that support partnership and paid-placement conversations.</p>
+                        </div>
+                        <div id="analytics-commercial-list" class="analytics-mini-list">
+                            <div class="analytics-empty">Loading commercial summary...</div>
+                        </div>
+                    </div>
+                    <div class="analytics-card">
+                        <div class="analytics-card-head">
+                            <h3>Sponsorship Inventory</h3>
+                            <p>Current premium placements and promotable supply.</p>
+                        </div>
+                        <div id="analytics-sponsor-list" class="analytics-mini-list">
+                            <div class="analytics-empty">Loading sponsorship inventory...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="analytics-grid analytics-trends-grid">
+                    <div class="analytics-card">
+                        <div class="analytics-card-head">
+                            <h3>Booking Demand Trend</h3>
+                            <p id="analytics-bookings-caption">Completed appointments in the selected range.</p>
+                        </div>
+                        <div id="analytics-bookings-chart" class="analytics-bars">
+                            <div class="analytics-empty">Loading booking trend...</div>
+                        </div>
+                    </div>
+                    <div class="analytics-card">
+                        <div class="analytics-card-head">
+                            <h3>Revenue Trend</h3>
+                            <p id="analytics-revenue-caption">Gross booking value in the selected range.</p>
+                        </div>
+                        <div id="analytics-revenue-chart" class="analytics-bars">
+                            <div class="analytics-empty">Loading revenue trend...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="analytics-grid analytics-breakdown-grid">
+                    <div class="analytics-card">
+                        <div class="analytics-card-head">
+                            <h3>Category Performance</h3>
+                            <p>Where demand is concentrated by venue type.</p>
+                        </div>
+                        <div id="analytics-category-breakdown" class="analytics-ranking-list">
+                            <div class="analytics-empty">Loading category performance...</div>
+                        </div>
+                    </div>
+                    <div class="analytics-card">
+                        <div class="analytics-card-head">
+                            <h3>Top Services</h3>
+                            <p>Most-booked treatments to position in sponsor decks.</p>
+                        </div>
+                        <div id="analytics-service-breakdown" class="analytics-ranking-list">
+                            <div class="analytics-empty">Loading service demand...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="analytics-card analytics-table-card">
+                    <div class="analytics-card-head">
+                        <h3>Top Venues</h3>
+                        <p>Best-performing stores by completed bookings and revenue.</p>
+                    </div>
+                    <div class="admin-table-container">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Venue</th>
+                                    <th>Category</th>
+                                    <th>Bookings</th>
+                                    <th>Revenue</th>
+                                    <th>Rating</th>
+                                    <th>Sponsorship Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="analytics-top-stores-tbody">
+                                <tr>
+                                    <td colspan="6">Loading top venues...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
 
             <!-- USERS TAB -->
@@ -827,7 +985,7 @@
             </div>
 
             <!-- STORES TAB -->
-            <div id="admin-stores" class="admin-panel">
+            <div id="admin-stores" class="admin-panel" style="display: none;">
                 <div class="panel-header">
                     <h2>Store Management</h2>
                     <button class="btn-primary" onclick="openCreateStoreModal()">

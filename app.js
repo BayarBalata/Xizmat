@@ -425,20 +425,116 @@ window.quickSearchCategory = function(category) {
     document.getElementById('explore')?.scrollIntoView({ behavior: 'smooth' });
 };
 
-function getBookableStaffOptions(merchant = bookingState.merchant) {
-    const explicitStaff = Array.isArray(merchant?.staff)
-        ? merchant.staff
-            .filter(st => st && typeof st.name === 'string' && st.name.trim())
-            .map((st, idx) => ({
-                id: st.id || `staff-${idx}`,
-                name: st.name.trim(),
-                role: st.role || 'Staff',
-                image: st.image || ''
-            }))
-        : [];
+const SEARCH_TERM_ALIASES = {
+    hair: ['haircut', 'cut', 'trim', 'fade', 'blowout', 'balayage', 'color', 'keratin', 'barber', 'styling'],
+    haircut: ['cut', 'trim', 'fade', 'barber'],
+    facial: ['skin', 'hydrafacial', 'cleansing', 'glow', 'peel', 'microdermabrasion'],
+    nails: ['nail', 'manicure', 'pedicure', 'gel', 'acrylic', 'extensions', 'polish'],
+    massage: ['swedish', 'deep tissue', 'hot stone', 'aromatherapy', 'body massage', 'back massage'],
+    makeup: ['bridal', 'party makeup', 'airbrush', 'lashes', 'contouring'],
+    brows: ['brow', 'brows', 'eyebrow', 'lash', 'lashes', 'threading', 'lamination', 'tint'],
+    laser: ['laser hair removal', 'botox', 'filler', 'prp', 'carbon peel', 'mesotherapy', 'rf lifting'],
+    waxing: ['wax', 'waxing', 'threading', 'underarm wax', 'facial wax'],
+    barber: ['haircut', 'fade', 'trim', 'beard'],
+    skin: ['facial', 'glow', 'hydrafacial', 'peel', 'acne treatment']
+};
 
-    if (explicitStaff.length > 0) return explicitStaff;
+function normalizeTextForSearch(value) {
+    return String(value || '')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/&/g, ' and ')
+        .replace(/[^a-zA-Z0-9\s]/g, ' ')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+}
 
+function getSearchTokens(value) {
+    return normalizeTextForSearch(value)
+        .split(' ')
+        .map(token => token.trim())
+        .filter(token => token.length >= 2);
+}
+
+function getAliasGroupForToken(token) {
+    const normalizedToken = normalizeTextForSearch(token);
+    const group = new Set();
+    if (!normalizedToken) return group;
+
+    group.add(normalizedToken);
+
+    Object.entries(SEARCH_TERM_ALIASES).forEach(([root, aliases]) => {
+        const normalizedRoot = normalizeTextForSearch(root);
+        const normalizedAliases = aliases.map(alias => normalizeTextForSearch(alias)).filter(Boolean);
+        const matchesRoot = normalizedToken === normalizedRoot
+            || normalizedRoot.includes(normalizedToken)
+            || normalizedToken.includes(normalizedRoot);
+        const matchesAlias = normalizedAliases.some(alias =>
+            alias === normalizedToken
+            || alias.includes(normalizedToken)
+            || normalizedToken.includes(alias)
+        );
+
+        if (!matchesRoot && !matchesAlias) return;
+
+        group.add(normalizedRoot);
+        normalizedAliases.forEach(alias => group.add(alias));
+    });
+
+    return group;
+}
+
+function doesNormalizedSearchTextMatchQuery(searchText, query) {
+    const normalizedSearchText = normalizeTextForSearch(searchText);
+    const normalizedQuery = normalizeTextForSearch(query);
+    if (!normalizedQuery) return true;
+    if (normalizedSearchText.includes(normalizedQuery)) return true;
+
+    const tokenGroups = getSearchTokens(normalizedQuery).map(getAliasGroupForToken);
+    if (tokenGroups.length === 0) return true;
+
+    return tokenGroups.every(group => Array.from(group).some(term => normalizedSearchText.includes(term)));
+}
+
+function buildMerchantSearchBlob(merchant) {
+    const services = Array.isArray(merchant?.services) ? merchant.services : [];
+    const staff = Array.isArray(merchant?.staff) ? merchant.staff : [];
+    const offers = allOffers.filter(offer => offer.storeId === merchant?.id);
+
+    return normalizeTextForSearch([
+        merchant?.name,
+        merchant?.address,
+        merchant?.category,
+        merchant?.type,
+        merchant?.description,
+        merchant?.about,
+        merchant?.bio,
+        ...services.flatMap(service => [service?.name, service?.category]),
+        ...staff.flatMap(member => [member?.name, member?.role]),
+        ...offers.map(offer => offer?.serviceName)
+    ].filter(Boolean).join(' '));
+}
+
+function normalizeStaffCollection(staffArray = []) {
+    return (Array.isArray(staffArray) ? staffArray : [])
+        .map((staff, idx) => {
+            const normalized = normalizeStaffMember({
+                id: staff?.id || `staff-${idx}`,
+                name: staff?.name,
+                role: staff?.role,
+                image: staff?.image
+            });
+            if (!normalized) return null;
+            return {
+                ...normalized,
+                active: staff?.active !== false
+            };
+        })
+        .filter(Boolean);
+}
+
+function getLegacyStaffFallback(merchant) {
     const workerCount = Math.max(0, Number(merchant?.workerCount) || 0);
     if (workerCount <= 0) return [];
 
@@ -446,8 +542,40 @@ function getBookableStaffOptions(merchant = bookingState.merchant) {
         id: workerCount > 1 ? `worker-${idx + 1}` : 'solo-worker',
         name: workerCount > 1 ? `Worker ${idx + 1}` : 'Main Specialist',
         role: workerCount > 1 ? 'Team Member' : (merchant?.category || 'Specialist'),
-        image: ''
+        image: '',
+        active: true,
+        isLegacyFallback: true
     }));
+}
+
+function getNormalizedMerchantStaff(merchant, { includeInactive = false, allowLegacyFallback = true } = {}) {
+    const normalizedStaff = normalizeStaffCollection(merchant?.staff);
+    const filteredStaff = includeInactive ? normalizedStaff : normalizedStaff.filter(staff => staff.active !== false);
+
+    if (filteredStaff.length > 0) return filteredStaff;
+    if (allowLegacyFallback) return getLegacyStaffFallback(merchant);
+    return [];
+}
+
+function getPersistedWorkerCount(staffArray = []) {
+    const activeStaffCount = normalizeStaffCollection(staffArray).filter(staff => staff.active !== false).length;
+    return Math.max(1, activeStaffCount || 1);
+}
+
+function getLegacyAwareWorkerCount(merchant) {
+    const explicitStaffCount = normalizeStaffCollection(merchant?.staff).filter(staff => staff.active !== false).length;
+    if (explicitStaffCount > 0) return explicitStaffCount;
+
+    const legacyCount = Math.max(0, Number(merchant?.workerCount) || 0);
+    return Math.max(1, legacyCount || 1);
+}
+
+function getEffectiveWorkerCapacity(merchant) {
+    return getLegacyAwareWorkerCount(merchant);
+}
+
+function getBookableStaffOptions(merchant = bookingState.merchant) {
+    return getNormalizedMerchantStaff(merchant, { includeInactive: false, allowLegacyFallback: true });
 }
 
 function getAutomaticStaffChoice() {
@@ -729,6 +857,89 @@ function setupEventListeners() {
     let authStep = 'choice';
     let tempAuthData = null;
 
+    function isLocalDevelopmentHost() {
+        const host = String(window.location.hostname || '').toLowerCase();
+        return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    }
+
+    function normalizeIraqiPhoneInput(value) {
+        const digits = String(value || '').replace(/\D/g, '');
+        if (!digits) return null;
+
+        let normalized = digits;
+        if (normalized.startsWith('964') && normalized.length === 13) {
+            normalized = normalized.slice(3);
+        }
+        if (normalized.startsWith('0') && normalized.length === 11) {
+            normalized = normalized.slice(1);
+        }
+
+        if (!/^7\d{9}$/.test(normalized)) return null;
+        return normalized;
+    }
+
+    function formatIraqiE164Phone(localPhone) {
+        return `+964${localPhone}`;
+    }
+
+    function getPhoneAuthErrorMessage(error) {
+        const code = String(error?.code || '');
+
+        if (code === 'auth/invalid-phone-number') {
+            return 'Invalid phone number. Use Iraqi mobile format like 750xxxxxxx or 0750xxxxxxx.';
+        }
+        if (code === 'auth/too-many-requests') {
+            return 'Too many verification attempts. Wait a while and try again.';
+        }
+        if (code === 'auth/quota-exceeded') {
+            return 'Firebase SMS quota is exhausted for this project.';
+        }
+        if (code === 'auth/captcha-check-failed' || code === 'auth/invalid-app-credential') {
+            return 'reCAPTCHA verification failed. Reload the page and try again.';
+        }
+        if (code === 'auth/operation-not-allowed') {
+            return 'Phone authentication is not enabled in Firebase Authentication.';
+        }
+        if (code === 'auth/unauthorized-domain') {
+            return `This domain (${window.location.hostname}) is not authorized for Firebase phone authentication.`;
+        }
+        if (code === 'auth/app-not-authorized') {
+            return 'This app is not authorized to use Firebase phone authentication.';
+        }
+
+        return error?.message || 'Unable to send the verification code.';
+    }
+
+    function ensureAuthPhoneFieldHints() {
+        ['reg-phone', 'login-phone'].forEach((fieldId) => {
+            const input = document.getElementById(fieldId);
+            if (!input) return;
+            input.setAttribute('inputmode', 'numeric');
+            input.setAttribute('autocomplete', 'tel');
+            input.setAttribute('maxlength', '11');
+        });
+
+        const registerForm = document.getElementById('auth-form-register');
+        if (registerForm && !document.getElementById('auth-phone-format-note')) {
+            const note = document.createElement('p');
+            note.id = 'auth-phone-format-note';
+            note.style.cssText = 'margin-top: 10px; font-size: 0.82rem; color: #6b7280; line-height: 1.5;';
+            note.textContent = 'Phone format: 750xxxxxxx or 0750xxxxxxx.';
+            registerForm.appendChild(note);
+        }
+
+        const recaptchaContainer = document.getElementById('recaptcha-container');
+        if (recaptchaContainer && isLocalDevelopmentHost() && !document.getElementById('auth-localhost-note')) {
+            const localNote = document.createElement('p');
+            localNote.id = 'auth-localhost-note';
+            localNote.style.cssText = 'margin-top: 12px; font-size: 0.82rem; color: #b45309; line-height: 1.5;';
+            localNote.textContent = 'Local development note: Firebase phone auth does not send real SMS codes from localhost. Use a deployed domain or Firebase test phone numbers.';
+            recaptchaContainer.insertAdjacentElement('afterend', localNote);
+        }
+    }
+
+    ensureAuthPhoneFieldHints();
+
 
     // 1. Initialize ReCAPTCHA
     if (!window.recaptchaVerifier) {
@@ -781,15 +992,20 @@ function setupEventListeners() {
         regForm.onsubmit = async (e) => {
             e.preventDefault();
             const name = document.getElementById('reg-name').value.trim();
-            const phone = document.getElementById('reg-phone').value.trim();
+            const rawPhone = document.getElementById('reg-phone').value.trim();
             const password = document.getElementById('reg-password').value;
+            const phone = normalizeIraqiPhoneInput(rawPhone);
 
-            if (phone.length < 10) {
-                showToast('Please enter a valid phone number', 'error');
+            if (!phone) {
+                showToast('Enter Iraqi mobile format like 750xxxxxxx or 0750xxxxxxx.', 'error');
                 return;
             }
             if (password.length < 6) {
                 showToast('Password must be at least 6 characters', 'error');
+                return;
+            }
+            if (isLocalDevelopmentHost()) {
+                showToast('Real SMS verification does not work on localhost. Use a deployed domain or configure Firebase test phone numbers.', 'error');
                 return;
             }
 
@@ -804,19 +1020,21 @@ function setupEventListeners() {
                 // Proceed to verify
                 const appVerifier = window.recaptchaVerifier;
                 // OTP Step is ONLY for registration
-                signInWithPhoneNumber(auth, '+964' + phone, appVerifier)
-                    .then((confirmationResult) => {
-                        window.confirmationResult = confirmationResult;
-                        tempAuthData = { type: 'register', name, phone, password };
-                        showAuthStep('verify');
-                        showToast('Verification code sent!', 'success');
-                    }).catch((error) => {
-                        console.error("SMS Error:", error);
-                        showToast("Error sending SMS: " + error.message, 'error');
+                try {
+                    const confirmationResult = await signInWithPhoneNumber(auth, formatIraqiE164Phone(phone), appVerifier);
+                    window.confirmationResult = confirmationResult;
+                    tempAuthData = { type: 'register', name, phone, password };
+                    showAuthStep('verify');
+                    showToast('Verification code sent!', 'success');
+                } catch (error) {
+                    console.error("SMS Error:", error);
+                    showToast(getPhoneAuthErrorMessage(error), 'error');
+                    if (window.recaptchaVerifier?.render && typeof grecaptcha !== 'undefined') {
                         window.recaptchaVerifier.render().then(function (widgetId) {
                             grecaptcha.reset(widgetId);
-                        });
-                    });
+                        }).catch(() => {});
+                    }
+                }
 
             } catch (error) {
                 console.error("Auth Error:", error);
@@ -830,11 +1048,12 @@ function setupEventListeners() {
     if (loginForm) {
         loginForm.onsubmit = async (e) => {
             e.preventDefault();
-            const phone = document.getElementById('login-phone').value.trim();
+            const rawPhone = document.getElementById('login-phone').value.trim();
+            const phone = normalizeIraqiPhoneInput(rawPhone);
             const password = document.getElementById('login-password').value;
 
-            if (phone.length < 10) {
-                showToast('Please enter a valid phone number', 'error');
+            if (!phone) {
+                showToast('Enter Iraqi mobile format like 750xxxxxxx or 0750xxxxxxx.', 'error');
                 return;
             }
 
@@ -1361,6 +1580,8 @@ function resetTransientUIState() {
 function renderBookingWizard() {
     const body = document.getElementById('booking-modal-body');
     const footer = document.getElementById('booking-modal-footer');
+    const includesStaffStep = getBookableStaffOptions(bookingState.merchant).length > 1;
+    const progressStepTotal = includesStaffStep ? 3 : 2;
     
     // Hide default close button for step 4 if we want to show our own top bar
     const defaultCloseBtn = document.querySelector('.close-booking');
@@ -1381,9 +1602,9 @@ function renderBookingWizard() {
     } else {
         // Header (Static for steps 1, 2 and 3)
         let headerStepText = '';
-        if(bookingState.step === 1) headerStepText = 'Step 1 of 3: Select Services';
-        if(bookingState.step === 2) headerStepText = 'Step 2 of 3: Select Staff';
-        if(bookingState.step === 3) headerStepText = 'Step 3 of 3: Date & Time';
+        if (bookingState.step === 1) headerStepText = `Step 1 of ${progressStepTotal}: Select Services`;
+        if (bookingState.step === 2) headerStepText = `Step 2 of ${progressStepTotal}: Select Staff`;
+        if (bookingState.step === 3) headerStepText = `Step ${includesStaffStep ? 3 : 2} of ${progressStepTotal}: Date & Time`;
 
         content += `
             <div class="modal-header" style="text-align: center; margin-bottom: 20px;">
@@ -1535,11 +1756,7 @@ window.toggleServiceSelection = function (name, basePrice, duration) {
 // Cache booked slots per date to avoid re-fetching
 let bookedSlotsCache = {};
 
-async function fetchBookedSlots(merchantId, dateStr) {
-    const selectedStaffKey = hasSpecificStaffSelection() ? String(bookingState.selectedStaff.id) : 'all';
-    const cacheKey = `${merchantId}_${dateStr}_${selectedStaffKey}`;
-    if (bookedSlotsCache[cacheKey]) return bookedSlotsCache[cacheKey];
-
+async function fetchBookedSlotsFromBookings(merchantId, dateStr, selectedStaff = bookingState.selectedStaff) {
     try {
         const selectedDate = new Date(dateStr);
         const dayStart = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate());
@@ -1583,7 +1800,7 @@ async function fetchBookedSlots(merchantId, dateStr) {
                 return;
             }
 
-            if (!doesBookingMatchSelectedStaff(data)) {
+            if (!doesBookingMatchSelectedStaff(data, selectedStaff)) {
                 return;
             }
 
@@ -1593,12 +1810,59 @@ async function fetchBookedSlots(merchantId, dateStr) {
             bookedTimes.set(timeKey, (bookedTimes.get(timeKey) || 0) + 1);
         });
 
-        bookedSlotsCache[cacheKey] = bookedTimes;
         return bookedTimes;
     } catch (e) {
         console.error("Error fetching booked slots:", e);
         return new Map();
     }
+}
+
+async function fetchBookedSlots(merchantId, dateStr) {
+    const selectedStaff = hasSpecificStaffSelection() ? normalizeStaffMember(bookingState.selectedStaff) : null;
+    const selectedStaffKey = selectedStaff ? String(selectedStaff.id) : 'all';
+    const cacheKey = `${merchantId}_${dateStr}_${selectedStaffKey}`;
+    if (bookedSlotsCache[cacheKey]) return bookedSlotsCache[cacheKey];
+
+    const bookedTimes = new Map();
+    const dateKey = getBookingDateKey(dateStr);
+
+    try {
+        const slotQuery = query(
+            collection(db, "bookingSlotAvailability"),
+            where("storeId", "==", merchantId)
+        );
+        const slotSnapshot = await getDocs(slotQuery);
+
+        slotSnapshot.forEach((slotDoc) => {
+            const slotState = getSlotAvailabilityState(slotDoc);
+            const slotData = slotState.slotData;
+            const slotDateKey = slotData.bookingDateKey || getBookingDateKey(slotData.bookingDate);
+            const slotTime = String(slotData.bookingTime || '').trim();
+            if (!slotTime || slotDateKey !== dateKey || slotState.totalBookings <= 0) return;
+
+            if (selectedStaff) {
+                const normalizedStaffName = String(selectedStaff.name || '').trim().toLowerCase();
+                const isSelectedStaffBooked = slotState.occupiedStaffIds.includes(String(selectedStaff.id))
+                    || slotState.occupiedStaffNames.includes(normalizedStaffName);
+                if (isSelectedStaffBooked) {
+                    bookedTimes.set(slotTime, Math.max(bookedTimes.get(slotTime) || 0, 1));
+                }
+                return;
+            }
+
+            bookedTimes.set(slotTime, Math.max(bookedTimes.get(slotTime) || 0, slotState.totalBookings));
+        });
+    } catch (slotError) {
+        console.warn("Error fetching slot availability, falling back to bookings:", slotError);
+    }
+
+    const bookingFallbackTimes = await fetchBookedSlotsFromBookings(merchantId, dateStr, selectedStaff);
+    bookingFallbackTimes.forEach((count, timeKey) => {
+        bookedTimes.set(timeKey, Math.max(bookedTimes.get(timeKey) || 0, count));
+    });
+
+    bookedSlotsCache[cacheKey] = bookedTimes;
+    return bookedTimes;
 }
 
 function formatTime12h(time) {
@@ -1716,7 +1980,7 @@ function renderBookingStep2() {
             const bookedSlots = bookingState.bookedSlots || new Map();
             const workerCount = hasSpecificStaffSelection()
                 ? 1
-                : Math.max(1, Number(bookingState.merchant.workerCount) || getBookableStaffOptions(bookingState.merchant).length || 1);
+                : getEffectiveWorkerCapacity(bookingState.merchant);
             let openSlotCount = 0;
             let fullyBookedCount = 0;
             let pastSlotCount = 0;
@@ -2270,30 +2534,571 @@ window.submitBooking = async function () {
 
 // ========== ADMIN FUNCTIONS ==========
 
+let currentAdminAnalyticsRange = '90d';
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function formatCompactNumber(value) {
+    return new Intl.NumberFormat('en-US', {
+        notation: 'compact',
+        maximumFractionDigits: value >= 1000 ? 1 : 0
+    }).format(Math.max(0, Number(value) || 0));
+}
+
+function formatIQDCompact(value) {
+    return `${formatCompactNumber(value)} IQD`;
+}
+
+function formatPercentValue(value, maximumFractionDigits = 0) {
+    return `${new Intl.NumberFormat('en-US', {
+        maximumFractionDigits
+    }).format(Math.max(0, Number(value) || 0))}%`;
+}
+
+function getAnalyticsRangeStart(rangeKey, now = new Date()) {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+
+    if (rangeKey === '30d') {
+        start.setDate(start.getDate() - 29);
+        return start;
+    }
+
+    if (rangeKey === '90d') {
+        start.setDate(start.getDate() - 89);
+        return start;
+    }
+
+    return null;
+}
+
+function getAnalyticsRangeLabel(rangeKey) {
+    if (rangeKey === '30d') return 'last 30 days';
+    if (rangeKey === '90d') return 'last 90 days';
+    return 'all time';
+}
+
+function isDateWithinAnalyticsRange(dateValue, rangeStart, rangeEnd = new Date()) {
+    const date = toSafeDate(dateValue);
+    if (!date) return false;
+    if (date > rangeEnd) return false;
+    return !rangeStart || date >= rangeStart;
+}
+
+function getBookingPrimaryDate(booking) {
+    return getBookingDateValue(booking) || toSafeDate(booking?.createdAt);
+}
+
+function getBookingRevenueValue(booking) {
+    return Math.max(0, Number(booking?.servicePrice ?? booking?.price ?? 0) || 0);
+}
+
+function getOrderRevenueValue(order) {
+    return Math.max(0, Number(order?.subtotal ?? order?.total ?? 0) || 0);
+}
+
+function splitBookingServiceNames(booking) {
+    const services = Array.isArray(booking?.services) && booking.services.length > 0
+        ? booking.services.map(service => service?.name)
+        : String(booking?.serviceName || '').split(',');
+
+    return services
+        .map(serviceName => String(serviceName || '').trim())
+        .filter(Boolean);
+}
+
+function buildStoreRatingMap(reviews) {
+    const ratingMap = new Map();
+    (Array.isArray(reviews) ? reviews : []).forEach((review) => {
+        const storeId = review?.storeId;
+        if (!storeId) return;
+
+        if (!ratingMap.has(storeId)) {
+            ratingMap.set(storeId, { count: 0, total: 0 });
+        }
+
+        const rating = ratingMap.get(storeId);
+        rating.count += 1;
+        rating.total += Math.max(0, Number(review?.rating) || 0);
+    });
+
+    ratingMap.forEach((rating) => {
+        rating.avg = rating.count > 0 ? rating.total / rating.count : 0;
+    });
+
+    return ratingMap;
+}
+
+function createAnalyticsBuckets(rangeKey, now = new Date()) {
+    const buckets = [];
+
+    if (rangeKey === 'all') {
+        for (let offset = 5; offset >= 0; offset--) {
+            const bucketStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+            const bucketEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
+            buckets.push({
+                label: bucketStart.toLocaleDateString('en-US', { month: 'short' }),
+                start: bucketStart,
+                end: bucketEnd,
+                bookings: 0,
+                revenue: 0
+            });
+        }
+        return buckets;
+    }
+
+    const bucketDays = rangeKey === '30d' ? 5 : 15;
+    const bucketCount = 6;
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const seriesStart = new Date(today);
+    seriesStart.setDate(seriesStart.getDate() - ((bucketCount * bucketDays) - 1));
+
+    for (let index = 0; index < bucketCount; index++) {
+        const bucketStart = new Date(seriesStart);
+        bucketStart.setDate(seriesStart.getDate() + (index * bucketDays));
+
+        const bucketEnd = new Date(bucketStart);
+        bucketEnd.setDate(bucketStart.getDate() + bucketDays);
+
+        buckets.push({
+            label: bucketStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            start: bucketStart,
+            end: bucketEnd,
+            bookings: 0,
+            revenue: 0
+        });
+    }
+
+    return buckets;
+}
+
+function addValueToAnalyticsBuckets(buckets, dateValue, fieldName, amount) {
+    const safeAmount = Math.max(0, Number(amount) || 0);
+    const date = toSafeDate(dateValue);
+    if (!date || !Array.isArray(buckets)) return;
+
+    const bucket = buckets.find(entry => date >= entry.start && date < entry.end);
+    if (!bucket) return;
+    bucket[fieldName] += safeAmount;
+}
+
+function renderAnalyticsMiniList(containerId, items) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        container.innerHTML = '<div class="analytics-empty">No data available yet.</div>';
+        return;
+    }
+
+    container.innerHTML = items.map(item => `
+        <div class="analytics-mini-item">
+            <span class="analytics-mini-label">${escapeHtml(item.label)}</span>
+            <span class="analytics-mini-value">${escapeHtml(item.value)}</span>
+        </div>
+    `).join('');
+}
+
+function renderAnalyticsRankingList(containerId, items, emptyMessage) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        container.innerHTML = `<div class="analytics-empty">${escapeHtml(emptyMessage || 'No data available yet.')}</div>`;
+        return;
+    }
+
+    const maxValue = Math.max(...items.map(item => Math.max(0, Number(item.value) || 0)), 1);
+
+    container.innerHTML = items.map(item => {
+        const width = Math.max(6, Math.round(((Math.max(0, Number(item.value) || 0)) / maxValue) * 100));
+        return `
+            <div class="analytics-ranking-item">
+                <div class="analytics-ranking-copy">
+                    <div class="analytics-ranking-title">${escapeHtml(item.title)}</div>
+                    <div class="analytics-ranking-meta">${escapeHtml(item.meta || '')}</div>
+                    <div class="analytics-progress">
+                        <div class="analytics-progress-bar" style="width:${width}%"></div>
+                    </div>
+                </div>
+                <div class="analytics-ranking-value">${escapeHtml(item.valueLabel ?? String(item.value))}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderAnalyticsBars(containerId, buckets, metricKey, fillClass = '') {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!Array.isArray(buckets) || buckets.length === 0) {
+        container.innerHTML = '<div class="analytics-empty">No trend data available yet.</div>';
+        return;
+    }
+
+    const maxValue = Math.max(...buckets.map(bucket => Math.max(0, Number(bucket?.[metricKey]) || 0)), 1);
+
+    container.innerHTML = buckets.map(bucket => {
+        const value = Math.max(0, Number(bucket?.[metricKey]) || 0);
+        const height = Math.max(8, Math.round((value / maxValue) * 100));
+        const valueLabel = metricKey === 'revenue'
+            ? formatIQDCompact(value)
+            : formatCompactNumber(value);
+
+        return `
+            <div class="analytics-bar-col">
+                <div class="analytics-bar-value">${escapeHtml(valueLabel)}</div>
+                <div class="analytics-bar-track">
+                    <div class="analytics-bar-fill ${fillClass}" style="height:${height}%"></div>
+                </div>
+                <div class="analytics-bar-label">${escapeHtml(bucket.label)}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function setAnalyticsLoadingState() {
+    const loadingMessage = 'Loading analytics...';
+    const headline = document.getElementById('analytics-headline');
+    const subheadline = document.getElementById('analytics-subheadline');
+    const topStores = document.getElementById('analytics-top-stores-tbody');
+
+    if (headline) headline.textContent = loadingMessage;
+    if (subheadline) subheadline.textContent = 'Gathering venue, booking, and sponsor data.';
+    if (topStores) topStores.innerHTML = '<tr><td colspan="6">Loading top venues...</td></tr>';
+
+    renderAnalyticsMiniList('analytics-audience-list', []);
+    renderAnalyticsMiniList('analytics-commercial-list', []);
+    renderAnalyticsMiniList('analytics-sponsor-list', []);
+    renderAnalyticsRankingList('analytics-category-breakdown', [], loadingMessage);
+    renderAnalyticsRankingList('analytics-service-breakdown', [], loadingMessage);
+
+    const bookingsChart = document.getElementById('analytics-bookings-chart');
+    const revenueChart = document.getElementById('analytics-revenue-chart');
+    if (bookingsChart) bookingsChart.innerHTML = '<div class="analytics-empty">Loading booking trend...</div>';
+    if (revenueChart) revenueChart.innerHTML = '<div class="analytics-empty">Loading revenue trend...</div>';
+}
+
+function updateAnalyticsRangeButtons() {
+    document.querySelectorAll('.analytics-filter-btn').forEach((button) => {
+        button.classList.toggle('active', button.dataset.range === currentAdminAnalyticsRange);
+    });
+}
+
+function loadAdminTabData(tabName) {
+    if (tabName === 'analytics') loadAdminAnalytics();
+    if (tabName === 'stores') loadAdminStores();
+    if (tabName === 'offers') loadAdminOffers();
+    if (tabName === 'sponsors') loadAdminSponsors();
+    if (tabName === 'orders') loadAdminOrders('all');
+    if (tabName === 'financials') loadFinancials();
+    if (tabName === 'users') loadAdminUsers();
+}
+
+function activateAdminTab(tabName) {
+    const adminTabs = document.querySelectorAll('.admin-tab');
+    adminTabs.forEach((tab) => {
+        tab.classList.toggle('active', tab.dataset.tab === tabName);
+    });
+
+    document.querySelectorAll('.admin-panel').forEach((panel) => {
+        panel.style.display = panel.id === `admin-${tabName}` ? 'block' : 'none';
+    });
+
+    loadAdminTabData(tabName);
+}
+
+window.setAdminAnalyticsRange = function (rangeKey) {
+    currentAdminAnalyticsRange = ['30d', '90d', 'all'].includes(rangeKey) ? rangeKey : '90d';
+    updateAnalyticsRangeButtons();
+    loadAdminAnalytics();
+};
+
+window.loadAdminAnalytics = async function () {
+    setAnalyticsLoadingState();
+    updateAnalyticsRangeButtons();
+
+    try {
+        const [
+            merchantSnapshot,
+            userSnapshot,
+            bookingSnapshot,
+            orderSnapshot,
+            sponsorSnapshot,
+            offerSnapshot,
+            reviewSnapshot
+        ] = await Promise.all([
+            getDocs(collection(db, "merchants")),
+            getDocs(collection(db, "users")),
+            getDocs(collection(db, "bookings")),
+            getDocs(collection(db, "orders")),
+            getDocs(collection(db, "sponsors")),
+            getDocs(collection(db, "offers")),
+            getDocs(collection(db, "reviews"))
+        ]);
+
+        const merchants = merchantSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const users = userSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const bookings = bookingSnapshot.docs.map(docSnap => ({
+            id: docSnap.id,
+            ...docSnap.data(),
+            bookingDate: getBookingDateValue(docSnap.data()) || toSafeDate(docSnap.data().bookingDate) || null
+        }));
+        const orders = orderSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const sponsors = sponsorSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const offers = offerSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const reviews = reviewSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+
+        allMerchants = merchants;
+        allUsers = users;
+        allBookings = bookings;
+        allSponsors = sponsors;
+        allOffers = offers;
+        allReviews = reviews;
+
+        const now = new Date();
+        const rangeStart = getAnalyticsRangeStart(currentAdminAnalyticsRange, now);
+        const activeMerchants = merchants.filter(merchant => !merchant.suspended);
+        const customerUsers = users.filter(user => user.role === 'customer');
+        const ownerUsers = users.filter(user => user.role === 'owner');
+        const activeSponsors = sponsors.filter(sponsor => {
+            const sponsorStart = toSafeDate(sponsor.startDate);
+            const sponsorEnd = toSafeDate(sponsor.endDate);
+            return sponsor.active
+                && (!sponsorStart || sponsorStart <= now)
+                && (!sponsorEnd || sponsorEnd >= now);
+        });
+        const activeOffers = offers.filter(offer => isOfferActiveAt(offer, now));
+        const sponsoredStoreIds = new Set(activeSponsors.filter(sponsor => sponsor.type === 'store').map(sponsor => sponsor.storeId));
+        const merchantMap = new Map(merchants.map(merchant => [merchant.id, merchant]));
+        const storeRatingMap = buildStoreRatingMap(reviews);
+
+        const rangedBookings = bookings.filter(booking => isDateWithinAnalyticsRange(getBookingPrimaryDate(booking), rangeStart));
+        const rangedOrders = orders.filter(order => isDateWithinAnalyticsRange(order.createdAt, rangeStart));
+        const completedBookings = rangedBookings.filter(booking => getNormalizedBookingStatus(booking.status) === 'completed');
+        const nonCancelledBookings = rangedBookings.filter(booking => !isCancelledBookingStatus(booking.status));
+        const rangedReviews = reviews.filter(review => isDateWithinAnalyticsRange(review.createdAt, rangeStart));
+
+        const totalRevenue = completedBookings.reduce((sum, booking) => sum + getBookingRevenueValue(booking), 0);
+        const totalOrderRevenue = rangedOrders.reduce((sum, order) => sum + getOrderRevenueValue(order), 0);
+        const bookedCustomerCounts = new Map();
+        completedBookings.forEach((booking) => {
+            const key = booking.userId || booking.customerPhone || booking.customerName || booking.id;
+            bookedCustomerCounts.set(key, (bookedCustomerCounts.get(key) || 0) + 1);
+        });
+
+        const bookedCustomerCount = bookedCustomerCounts.size;
+        const repeatCustomerCount = Array.from(bookedCustomerCounts.values()).filter(count => count > 1).length;
+        const repeatCustomerRate = bookedCustomerCount > 0 ? (repeatCustomerCount / bookedCustomerCount) * 100 : 0;
+        const avgBookingValue = completedBookings.length > 0 ? totalRevenue / completedBookings.length : 0;
+        const avgOrderValue = rangedOrders.length > 0 ? totalOrderRevenue / rangedOrders.length : 0;
+        const totalServices = activeMerchants.reduce((sum, merchant) => sum + ((merchant.services || []).length), 0);
+        const geoReadyVenues = activeMerchants.filter(merchant => merchant.lat && merchant.lng).length;
+        const avgTeamSize = activeMerchants.length > 0
+            ? activeMerchants.reduce((sum, merchant) => sum + getEffectiveWorkerCapacity(merchant), 0) / activeMerchants.length
+            : 0;
+        const reviewAverage = reviews.length > 0
+            ? reviews.reduce((sum, review) => sum + (Number(review.rating) || 0), 0) / reviews.length
+            : 0;
+
+        const categoryStats = new Map();
+        completedBookings.forEach((booking) => {
+            const merchant = merchantMap.get(booking.storeId || booking.merchantId);
+            const categoryName = merchant?.category || 'Uncategorized';
+            if (!categoryStats.has(categoryName)) {
+                categoryStats.set(categoryName, {
+                    title: categoryName,
+                    value: 0,
+                    venueIds: new Set(),
+                    revenue: 0
+                });
+            }
+
+            const category = categoryStats.get(categoryName);
+            category.value += 1;
+            category.revenue += getBookingRevenueValue(booking);
+            if (merchant?.id) category.venueIds.add(merchant.id);
+        });
+
+        const serviceStats = new Map();
+        completedBookings.forEach((booking) => {
+            splitBookingServiceNames(booking).forEach((serviceName) => {
+                if (!serviceStats.has(serviceName)) {
+                    serviceStats.set(serviceName, { title: serviceName, value: 0, revenue: 0 });
+                }
+                const service = serviceStats.get(serviceName);
+                service.value += 1;
+                service.revenue += getBookingRevenueValue(booking);
+            });
+        });
+
+        const storePerformance = new Map();
+        activeMerchants.forEach((merchant) => {
+            const rating = storeRatingMap.get(merchant.id) || { avg: 0, count: 0 };
+            storePerformance.set(merchant.id, {
+                merchant,
+                bookings: 0,
+                revenue: 0,
+                ratingAvg: rating.avg,
+                ratingCount: rating.count,
+                sponsored: sponsoredStoreIds.has(merchant.id)
+            });
+        });
+
+        completedBookings.forEach((booking) => {
+            const merchantId = booking.storeId || booking.merchantId;
+            if (!merchantId || !storePerformance.has(merchantId)) return;
+            const performance = storePerformance.get(merchantId);
+            performance.bookings += 1;
+            performance.revenue += getBookingRevenueValue(booking);
+        });
+
+        const topStores = Array.from(storePerformance.values())
+            .sort((a, b) => {
+                if (b.bookings !== a.bookings) return b.bookings - a.bookings;
+                if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+                return b.ratingAvg - a.ratingAvg;
+            })
+            .slice(0, 8);
+
+        const bookingsTrend = createAnalyticsBuckets(currentAdminAnalyticsRange, now);
+        const revenueTrend = createAnalyticsBuckets(currentAdminAnalyticsRange, now);
+
+        nonCancelledBookings.forEach((booking) => {
+            addValueToAnalyticsBuckets(bookingsTrend, getBookingPrimaryDate(booking), 'bookings', 1);
+        });
+
+        completedBookings.forEach((booking) => {
+            addValueToAnalyticsBuckets(revenueTrend, getBookingPrimaryDate(booking), 'revenue', getBookingRevenueValue(booking));
+        });
+
+        const categoryItems = Array.from(categoryStats.values())
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 5)
+            .map((item) => ({
+                title: item.title,
+                meta: `${item.venueIds.size} venue${item.venueIds.size === 1 ? '' : 's'} • ${formatIQDCompact(item.revenue)}`,
+                value: item.value,
+                valueLabel: `${formatCompactNumber(item.value)} bookings`
+            }));
+
+        const serviceItems = Array.from(serviceStats.values())
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 5)
+            .map((item) => ({
+                title: item.title,
+                meta: `${formatIQDCompact(item.revenue)} generated`,
+                value: item.value,
+                valueLabel: `${formatCompactNumber(item.value)} bookings`
+            }));
+
+        const headline = document.getElementById('analytics-headline');
+        const subheadline = document.getElementById('analytics-subheadline');
+        if (headline) {
+            headline.textContent = `${formatCompactNumber(completedBookings.length)} completed bookings across ${activeMerchants.length} active venues`;
+        }
+        if (subheadline) {
+            subheadline.textContent = `${formatCompactNumber(bookedCustomerCount)} customers booked in the ${getAnalyticsRangeLabel(currentAdminAnalyticsRange)}, generating ${formatIQDCompact(totalRevenue)} in booking value while ${activeSponsors.length} sponsorship placements are currently active.`;
+        }
+
+        const statVenue = document.getElementById('analytics-stat-venues');
+        const statCustomers = document.getElementById('analytics-stat-customers');
+        const statBookings = document.getElementById('analytics-stat-bookings');
+        const statRevenue = document.getElementById('analytics-stat-revenue');
+        const statRating = document.getElementById('analytics-stat-rating');
+        const statRatingMeta = document.getElementById('analytics-stat-rating-meta');
+        const statRepeat = document.getElementById('analytics-stat-repeat');
+
+        if (statVenue) statVenue.textContent = formatCompactNumber(activeMerchants.length);
+        if (statCustomers) statCustomers.textContent = formatCompactNumber(customerUsers.length);
+        if (statBookings) statBookings.textContent = formatCompactNumber(completedBookings.length);
+        if (statRevenue) statRevenue.textContent = formatIQDCompact(totalRevenue);
+        if (statRating) statRating.textContent = reviewAverage ? reviewAverage.toFixed(1) : '0.0';
+        if (statRatingMeta) statRatingMeta.textContent = `${formatCompactNumber(reviews.length)} total reviews${rangedReviews.length && currentAdminAnalyticsRange !== 'all' ? ` • ${formatCompactNumber(rangedReviews.length)} in range` : ''}`;
+        if (statRepeat) statRepeat.textContent = formatPercentValue(repeatCustomerRate, 0);
+
+        renderAnalyticsMiniList('analytics-audience-list', [
+            { label: 'Registered customers', value: formatCompactNumber(customerUsers.length) },
+            { label: 'Customers with bookings in range', value: formatCompactNumber(bookedCustomerCount) },
+            { label: 'Repeat customers', value: `${formatCompactNumber(repeatCustomerCount)} (${formatPercentValue(repeatCustomerRate)})` },
+            { label: 'Owner accounts', value: formatCompactNumber(ownerUsers.length) },
+            { label: 'Average team size', value: `${avgTeamSize ? avgTeamSize.toFixed(1) : '0.0'} workers/store` }
+        ]);
+
+        renderAnalyticsMiniList('analytics-commercial-list', [
+            { label: 'Gross booking value', value: formatIQDCompact(totalRevenue) },
+            { label: 'Average booking value', value: formatIQDCompact(avgBookingValue) },
+            { label: 'Shop order GMV', value: formatIQDCompact(totalOrderRevenue) },
+            { label: 'Average order value', value: formatIQDCompact(avgOrderValue) },
+            { label: 'Live offers', value: formatCompactNumber(activeOffers.length) },
+            { label: 'Bookable services', value: formatCompactNumber(totalServices) }
+        ]);
+
+        renderAnalyticsMiniList('analytics-sponsor-list', [
+            { label: 'Active sponsorship placements', value: formatCompactNumber(activeSponsors.length) },
+            { label: 'Sponsored stores live now', value: formatCompactNumber(sponsoredStoreIds.size) },
+            { label: 'External ad placements live now', value: formatCompactNumber(activeSponsors.filter(sponsor => sponsor.type === 'external').length) },
+            { label: 'Geo-ready venues', value: formatCompactNumber(geoReadyVenues) },
+            { label: 'Open premium inventory', value: formatCompactNumber(Math.max(0, activeMerchants.length - sponsoredStoreIds.size)) }
+        ]);
+
+        const bookingCaption = document.getElementById('analytics-bookings-caption');
+        const revenueCaption = document.getElementById('analytics-revenue-caption');
+        if (bookingCaption) bookingCaption.textContent = `Non-cancelled appointments across the ${getAnalyticsRangeLabel(currentAdminAnalyticsRange)}.`;
+        if (revenueCaption) revenueCaption.textContent = `Completed booking value across the ${getAnalyticsRangeLabel(currentAdminAnalyticsRange)}.`;
+
+        renderAnalyticsBars('analytics-bookings-chart', bookingsTrend, 'bookings');
+        renderAnalyticsBars('analytics-revenue-chart', revenueTrend, 'revenue', 'revenue');
+        renderAnalyticsRankingList('analytics-category-breakdown', categoryItems, 'No completed booking data for categories yet.');
+        renderAnalyticsRankingList('analytics-service-breakdown', serviceItems, 'No completed service data yet.');
+
+        const topStoresBody = document.getElementById('analytics-top-stores-tbody');
+        if (topStoresBody) {
+            if (topStores.length === 0) {
+                topStoresBody.innerHTML = '<tr><td colspan="6">No venue performance data yet.</td></tr>';
+            } else {
+                topStoresBody.innerHTML = topStores.map((entry) => `
+                    <tr>
+                        <td><strong>${escapeHtml(entry.merchant.name || 'Venue')}</strong></td>
+                        <td>${escapeHtml(entry.merchant.category || 'Uncategorized')}</td>
+                        <td>${formatCompactNumber(entry.bookings)}</td>
+                        <td>${formatIQDCompact(entry.revenue)}</td>
+                        <td>${entry.ratingCount > 0 ? `${entry.ratingAvg.toFixed(1)} (${formatCompactNumber(entry.ratingCount)} reviews)` : 'No reviews'}</td>
+                        <td>${entry.sponsored ? 'Sponsored Live' : 'Available'}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+    } catch (error) {
+        console.error('Error loading admin analytics:', error);
+        showToast('Failed to load admin analytics.', 'error');
+
+        const headline = document.getElementById('analytics-headline');
+        const subheadline = document.getElementById('analytics-subheadline');
+        const topStores = document.getElementById('analytics-top-stores-tbody');
+
+        if (headline) headline.textContent = 'Analytics unavailable';
+        if (subheadline) subheadline.textContent = 'There was a problem loading platform activity data.';
+        if (topStores) topStores.innerHTML = '<tr><td colspan="6">Error loading top venues.</td></tr>';
+    }
+};
+
 // Admin Tab Switching
 window.addEventListener('DOMContentLoaded', () => {
     const adminTabs = document.querySelectorAll('.admin-tab');
     adminTabs.forEach(tab => {
         tab.addEventListener('click', () => {
-            adminTabs.forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-
-            // Hide all panels
-            document.querySelectorAll('.admin-panel').forEach(p => p.style.display = 'none');
-
-            // Show target panel
-            const targetId = `admin-${tab.dataset.tab}`;
-            document.getElementById(targetId).style.display = 'block';
-
-            // Load data for the tab
-            if (tab.dataset.tab === 'stores') loadAdminStores();
-            if (tab.dataset.tab === 'offers') loadAdminOffers();
-            if (tab.dataset.tab === 'sponsors') loadAdminSponsors();
-            if (tab.dataset.tab === 'orders') loadAdminOrders('all');
-            if (tab.dataset.tab === 'financials') loadFinancials();
-            if (tab.dataset.tab === 'users') loadAdminUsers();
+            activateAdminTab(tab.dataset.tab);
         });
     });
+    updateAnalyticsRangeButtons();
 });
 
 // Load admin stores
@@ -3856,8 +4661,8 @@ window.loadAdminDashboard = async function () {
     document.getElementById('dashboard-owner').style.display = 'none';
     document.getElementById('dashboard-admin').style.display = 'block';
 
-    // Load initial data
-    loadAdminUsers();
+    // Default to analytics for sponsor and partnership conversations
+    activateAdminTab('analytics');
 }
 
 let allUsers = [];
@@ -4874,11 +5679,12 @@ async function loadOwnerStore() {
     const store = allMerchants.find(m => m.id === currentUser.storeId);
 
     if (!store) return;
+    const derivedWorkerCount = getLegacyAwareWorkerCount(store);
 
     // Populate Form
     document.getElementById('owner-store-name').value = store.name;
     document.getElementById('owner-store-address').value = store.address || '';
-    document.getElementById('owner-store-workers').value = store.workerCount || 1;
+    document.getElementById('owner-store-workers').value = derivedWorkerCount;
     document.getElementById('owner-cancellation-policy').value = store.cancellationPolicy || '';
     document.getElementById('owner-store-lat').value = store.lat || '';
     document.getElementById('owner-store-lng').value = store.lng || '';
@@ -5073,19 +5879,19 @@ window.saveOwnerStoreDetails = async function () {
     try {
         const nameEle = document.getElementById('owner-store-name');
         const addressEle = document.getElementById('owner-store-address');
-        const workersEle = document.getElementById('owner-store-workers');
         const latEle = document.getElementById('owner-store-lat');
         const lngEle = document.getElementById('owner-store-lng');
         const photoFile = document.getElementById('owner-store-photo-file').files[0];
 
-        if (!nameEle || !workersEle) {
+        if (!nameEle) {
             alert("Error: Critical form elements are missing from the page.");
             return;
         }
 
         const name = nameEle.value;
         const address = addressEle ? addressEle.value : '';
-        const workerCount = Math.max(1, parseInt(workersEle.value) || 1);
+        const store = allMerchants.find(m => m.id === currentUser?.storeId);
+        const workerCount = getLegacyAwareWorkerCount(store);
         const cancellationPolicy = document.getElementById('owner-cancellation-policy')?.value || '';
         
         let updateData = {
@@ -5218,8 +6024,18 @@ async function saveOwnerService(e) {
 window.renderOwnerStaff = function (staffArray) {
     const list = document.getElementById('owner-staff-list');
     if (!list) return;
-    
-    list.innerHTML = staffArray.map((st, i) => `
+
+    const normalizedStaff = normalizeStaffCollection(staffArray);
+    if (normalizedStaff.length === 0) {
+        list.innerHTML = `
+            <div class="empty-state" style="padding: 18px; font-size: 0.9rem;">
+                No named workers yet. Add staff members here to control who customers can book with.
+            </div>
+        `;
+        return;
+    }
+
+    list.innerHTML = normalizedStaff.map((st, i) => `
          <div class="sortable-item">
             ${st.image ? `<img src="${st.image}" style="width:40px; height:40px; border-radius:50%; object-fit:cover; margin-right:10px;">` : `<div style="width:40px; height:40px; border-radius:50%; background:#e2e8f0; display:flex; align-items:center; justify-content:center; margin-right:10px; font-weight:bold; color:#64748b;">${st.name.charAt(0)}</div>`}
              <div class="service-info">
@@ -5247,7 +6063,9 @@ window.openAddStaffModalForOwner = function () {
 
 window.editOwnerStaff = function (index) {
     const store = allMerchants.find(m => m.id === currentUser.storeId);
-    const st = store.staff[index];
+    const normalizedStaff = normalizeStaffCollection(store?.staff);
+    const st = normalizedStaff[index];
+    if (!st) return;
 
     document.getElementById('staff-modal-title').textContent = 'Edit Staff Member';
     document.getElementById('staff-edit-index').value = index;
@@ -5261,16 +6079,68 @@ window.editOwnerStaff = function (index) {
     document.getElementById('staff-modal').style.display = 'flex';
 };
 
+function serializeStaffForStorage(staffArray = []) {
+    return normalizeStaffCollection(staffArray).map(staff => ({
+        id: staff.id,
+        name: staff.name,
+        role: staff.role || '',
+        image: staff.image || '',
+        active: staff.active !== false
+    }));
+}
+
+async function getFutureBookingsForStaff(storeId, staffMember) {
+    const normalizedStaff = normalizeStaffMember(staffMember);
+    if (!storeId || !normalizedStaff) return [];
+
+    const bookingsQuery = query(collection(db, "bookings"), where("storeId", "==", storeId));
+    const snapshot = await getDocs(bookingsQuery);
+    const now = new Date();
+
+    return snapshot.docs
+        .map(docSnap => ({ id: docSnap.id, ...docSnap.data() }))
+        .filter((booking) => {
+            const status = getNormalizedBookingStatus(booking.status);
+            if (!['pending', 'confirmed'].includes(status)) return false;
+
+            const bookingDate = getBookingDateValue(booking);
+            if (!bookingDate || bookingDate < now) return false;
+
+            return doesBookingMatchSelectedStaff(booking, normalizedStaff);
+        });
+}
+
 window.deleteOwnerStaff = async function (index) {
     if (!await showConfirm('Are you sure you want to delete this staff member?')) return;
 
     const store = allMerchants.find(m => m.id === currentUser.storeId);
-    store.staff.splice(index, 1);
+    if (!store) return;
+    const normalizedStaff = normalizeStaffCollection(store.staff);
+    const staffToDelete = normalizedStaff[index];
+    if (!staffToDelete) return;
+
+    const futureBookings = await getFutureBookingsForStaff(currentUser.storeId, staffToDelete);
+    if (futureBookings.length > 0) {
+        showToast(`Reassign or cancel ${futureBookings.length} upcoming booking${futureBookings.length === 1 ? '' : 's'} for ${staffToDelete.name} before removing this worker.`, 'error');
+        return;
+    }
+
+    const nextStaff = normalizedStaff.filter((_, staffIndex) => staffIndex !== index);
+    const workerCount = getPersistedWorkerCount(nextStaff);
 
     try {
-        await updateDoc(doc(db, "merchants", currentUser.storeId), { staff: store.staff });
+        await updateDoc(doc(db, "merchants", currentUser.storeId), {
+            staff: serializeStaffForStorage(nextStaff),
+            workerCount
+        });
+        store.staff = serializeStaffForStorage(nextStaff);
+        store.workerCount = workerCount;
         renderOwnerStaff(store.staff);
+        const workersInput = document.getElementById('owner-store-workers');
+        if (workersInput) workersInput.value = workerCount;
+        showToast('Staff member removed.', 'success');
     } catch (e) {
+        console.error(e);
         showToast('Error deleting staff member', 'error');
     }
 };
@@ -5283,26 +6153,49 @@ async function saveOwnerStaff(e) {
     const index = parseInt(document.getElementById('staff-edit-index').value);
 
     const store = allMerchants.find(m => m.id === currentUser.storeId);
-    if (!store.staff) store.staff = [];
+    if (!store) return;
 
-    const existingId = index >= 0 ? (store.staff[index]?.id || null) : null;
+    const normalizedStaff = normalizeStaffCollection(store.staff);
+    const duplicateName = normalizedStaff.some((staffMember, staffIndex) => {
+        if (staffIndex === index) return false;
+        return normalizeTextForSearch(staffMember.name) === normalizeTextForSearch(name);
+    });
+    if (duplicateName) {
+        showToast('Each worker needs a unique name.', 'error');
+        return;
+    }
+
+    const existingId = index >= 0 ? (normalizedStaff[index]?.id || null) : null;
     const newStaff = {
         id: existingId || `staff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         name,
         role,
-        image
+        image,
+        active: true
     };
 
+    const nextStaff = [...normalizedStaff];
     if (index === -1) {
-        store.staff.push(newStaff);
+        nextStaff.push(newStaff);
     } else {
-        store.staff[index] = newStaff;
+        nextStaff[index] = newStaff;
     }
 
+    const serializedStaff = serializeStaffForStorage(nextStaff);
+    const workerCount = getPersistedWorkerCount(serializedStaff);
+
     try {
-        await updateDoc(doc(db, "merchants", currentUser.storeId), { staff: store.staff });
+        await updateDoc(doc(db, "merchants", currentUser.storeId), {
+            staff: serializedStaff,
+            workerCount
+        });
+        store.staff = serializedStaff;
+        store.workerCount = workerCount;
         renderOwnerStaff(store.staff);
+        const workersInput = document.getElementById('owner-store-workers');
+        if (workersInput) workersInput.value = workerCount;
         closeModal('staff-modal');
+        showToast('Staff member saved.', 'success');
     } catch (e) {
         console.error(e);
         showToast('Error saving staff member', 'error');
@@ -5535,9 +6428,9 @@ function renderServiceSearchStep(step) {
                 <input type="number" id="budget-input" class="budget-input" placeholder="e.g. 40000" min="0" step="1000">
                 <span class="budget-currency">IQD</span>
             </div>
-            <p style="color: var(--text-light); font-size: 0.8rem; text-align: center; margin-top: 10px;">Leave empty to see all salons offering this service</p>
+            <p style="color: var(--text-light); font-size: 0.8rem; text-align: center; margin-top: 10px;">Leave empty to see all venues offering this service</p>
             <button class="btn-primary" style="width: 100%; margin-top: 24px;" onclick="applyServiceBudgetFilter()">
-                 Search Salons
+                 Search Venues
             </button>
         `;
         // Allow pressing Enter to search
@@ -5550,7 +6443,7 @@ function renderServiceSearchStep(step) {
         body.innerHTML = `
             <div style="text-align:center; padding:60px 0;">
                 <div style="font-size:2rem; margin-bottom:12px;"></div>
-                <p style="color: var(--text-light);">Searching salons...</p>
+                <p style="color: var(--text-light);">Searching venues...</p>
             </div>
         `;
         setTimeout(() => renderServiceSearchResults(), 100);
@@ -5573,33 +6466,94 @@ window.applyServiceBudgetFilter = function () {
     renderServiceSearchStep('results');
 };
 
+function getServiceSearchCategoryConfig(categoryKey) {
+    return SERVICE_CATEGORIES.find(category => category.key === categoryKey) || null;
+}
+
+function getServiceSearchMatchScore(service, merchant, selectedSubService, categoryConfig) {
+    const searchParts = [
+        selectedSubService,
+        categoryConfig?.name,
+        categoryConfig?.key
+    ].filter(Boolean);
+    const queryText = searchParts.join(' ');
+    if (!queryText) return 0;
+
+    const serviceBlob = normalizeTextForSearch([
+        service?.name,
+        service?.category,
+        merchant?.name,
+        merchant?.category,
+        merchant?.type,
+        merchant?.description,
+        merchant?.about
+    ].filter(Boolean).join(' '));
+    if (!doesNormalizedSearchTextMatchQuery(serviceBlob, queryText)) {
+        return 0;
+    }
+
+    let score = 0;
+    const normalizedServiceName = normalizeTextForSearch(service?.name);
+    const normalizedCategory = normalizeTextForSearch(service?.category || merchant?.category);
+    const normalizedSubService = normalizeTextForSearch(selectedSubService);
+
+    if (normalizedSubService && normalizedServiceName.includes(normalizedSubService)) score += 10;
+    if (normalizedSubService && normalizedCategory.includes(normalizedSubService)) score += 5;
+    if (categoryConfig && doesNormalizedSearchTextMatchQuery(normalizedCategory, `${categoryConfig.name} ${categoryConfig.key}`)) score += 4;
+
+    const tokenGroups = getSearchTokens(queryText).map(getAliasGroupForToken);
+    tokenGroups.forEach(group => {
+        if (Array.from(group).some(term => serviceBlob.includes(term))) {
+            score += 2;
+        }
+    });
+
+    return score;
+}
+
 function renderServiceSearchResults() {
     const body = document.getElementById('service-search-body');
     const { selectedSubService, budget } = serviceSearchState;
-    const key = selectedSubService.toLowerCase();
+    const categoryConfig = getServiceSearchCategoryConfig(serviceSearchState.selectedCategory);
 
     // Find merchants with a matching service
     const results = [];
     allMerchants.forEach(merchant => {
         if (!merchant.services || merchant.services.length === 0) return;
         merchant.services.forEach(s => {
-            if (!s.name.toLowerCase().includes(key)) return;
+            const matchScore = getServiceSearchMatchScore(s, merchant, selectedSubService, categoryConfig);
+            if (matchScore <= 0) return;
             if (budget !== null && s.price > budget) return;
-            results.push({ merchant, service: s });
+            const rating = getStoreRating(merchant.id);
+            results.push({
+                merchant,
+                service: s,
+                matchScore,
+                ratingAvg: parseFloat(rating.avg) || 0,
+                ratingCount: rating.count || 0
+            });
         });
     });
 
+    results.sort((a, b) => {
+        if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+        if (b.ratingAvg !== a.ratingAvg) return b.ratingAvg - a.ratingAvg;
+        if (b.ratingCount !== a.ratingCount) return b.ratingCount - a.ratingCount;
+        return (Number(a.service.price) || 0) - (Number(b.service.price) || 0);
+    });
+
     const budgetLabel = budget ? `Budget: ${budget.toLocaleString()} IQD` : 'No budget limit';
+    const categoryLabel = categoryConfig ? ` · ${categoryConfig.name.trim()}` : '';
 
     if (results.length === 0) {
         body.innerHTML = `
             <button class="btn-back" onclick="renderServiceSearchStep('budget')">← Back</button>
             <h2 style="margin-bottom:6px;">${selectedSubService}</h2>
-            <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}</p>
+            <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}${categoryLabel}</p>
             <div class="empty-state" style="padding: 40px 0;">
                 <div style="font-size:3rem; margin-bottom:12px;"></div>
-                <p>No salons found for this service${budget ? ' in your budget' : ''}.</p>
-                <button class="btn-outline" style="margin-top:16px;" onclick="renderServiceSearchStep('budget')">Try a higher budget</button>
+                <p>No venues found for this service${budget ? ' in your budget' : ''}.</p>
+                <button class="btn-outline" style="margin-top:16px;" onclick="renderServiceSearchStep('budget')">${budget ? 'Try a higher budget' : 'Choose another service'}</button>
             </div>
         `;
         return;
@@ -5608,7 +6562,7 @@ function renderServiceSearchResults() {
     body.innerHTML = `
         <button class="btn-back" onclick="renderServiceSearchStep('budget')">← Back</button>
         <h2 style="margin-bottom:6px;">${selectedSubService}</h2>
-        <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel} · <strong>${results.length} salon${results.length > 1 ? 's' : ''} found</strong></p>
+        <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}${categoryLabel} · <strong>${results.length} venue${results.length > 1 ? 's' : ''} found</strong></p>
         <div class="service-results-list">
             ${results.map(({ merchant, service }) => {
                 const imageContent = merchant.photoUrl
@@ -5997,6 +6951,42 @@ function updateDiscoveryMapMarkers(filteredMerchants) {
     }
 }
 
+function doesMerchantMatchCategoryFilter(merchant, categoryFilter) {
+    if (!categoryFilter || categoryFilter === 'all') return true;
+
+    const categoryBlob = normalizeTextForSearch([
+        merchant?.category,
+        merchant?.type,
+        ...(Array.isArray(merchant?.services) ? merchant.services.flatMap(service => [service?.category, service?.name]) : [])
+    ].filter(Boolean).join(' '));
+
+    return doesNormalizedSearchTextMatchQuery(categoryBlob, categoryFilter);
+}
+
+function getMerchantSearchRank(merchant, queryText) {
+    const normalizedQuery = normalizeTextForSearch(queryText);
+    if (!normalizedQuery) return 0;
+
+    const merchantName = normalizeTextForSearch(merchant?.name);
+    const merchantCategory = normalizeTextForSearch(merchant?.category);
+    const merchantAddress = normalizeTextForSearch(merchant?.address);
+    const merchantSearchBlob = buildMerchantSearchBlob(merchant);
+    const tokenGroups = getSearchTokens(normalizedQuery).map(getAliasGroupForToken);
+
+    let score = 0;
+    if (merchantName.includes(normalizedQuery)) score += 12;
+    if (merchantCategory.includes(normalizedQuery)) score += 8;
+    if (merchantAddress.includes(normalizedQuery)) score += 4;
+
+    tokenGroups.forEach(group => {
+        if (Array.from(group).some(term => merchantSearchBlob.includes(term))) {
+            score += 2;
+        }
+    });
+
+    return score;
+}
+
 window.performSearch = function() {
     const treatmentQuery = (document.getElementById('search-treatment')?.value || '').trim().toLowerCase();
     const categoryFilter = document.getElementById('search-category')?.value || 'all';
@@ -6006,20 +6996,23 @@ window.performSearch = function() {
     isSearchActive = treatmentQuery !== '' || categoryFilter !== 'all' || sortBy !== 'default';
     
     let filtered = [...allMerchants];
+    const searchScores = new Map();
     
-    // Filter by treatment name (search through services)
+    // Filter by treatment/category text through merchant, service, staff and offer metadata
     if (treatmentQuery) {
         filtered = filtered.filter(m => {
-            const services = m.services || [];
-            const nameMatch = m.name.toLowerCase().includes(treatmentQuery);
-            const serviceMatch = services.some(s => s.name.toLowerCase().includes(treatmentQuery));
-            return nameMatch || serviceMatch;
+            const searchBlob = buildMerchantSearchBlob(m);
+            const isMatch = doesNormalizedSearchTextMatchQuery(searchBlob, treatmentQuery);
+            if (isMatch) {
+                searchScores.set(m.id, getMerchantSearchRank(m, treatmentQuery));
+            }
+            return isMatch;
         });
     }
     
     // Filter by category
     if (categoryFilter !== 'all') {
-        filtered = filtered.filter(m => m.category === categoryFilter);
+        filtered = filtered.filter(m => doesMerchantMatchCategoryFilter(m, categoryFilter));
     }
     
     // Also apply the current type filter (All / Salons / Beauty Centers chips)
@@ -6045,6 +7038,17 @@ window.performSearch = function() {
             const distA = parseFloat(a.distance) || 999;
             const distB = parseFloat(b.distance) || 999;
             return distA - distB;
+        });
+    } else if (treatmentQuery) {
+        filtered.sort((a, b) => {
+            const scoreA = searchScores.get(a.id) || 0;
+            const scoreB = searchScores.get(b.id) || 0;
+            if (scoreB !== scoreA) return scoreB - scoreA;
+
+            const ratingA = getStoreRating(a.id);
+            const ratingB = getStoreRating(b.id);
+            if (ratingB.count !== ratingA.count) return ratingB.count - ratingA.count;
+            return String(a.name || '').localeCompare(String(b.name || ''));
         });
     }
     
@@ -6238,18 +7242,7 @@ function getVenueGalleryImages(merchant) {
 }
 
 function getVenueTeamMembers(merchant) {
-    const explicitTeam = getBookableStaffOptions(merchant);
-    if (explicitTeam.length > 0) return explicitTeam;
-
-    const workerCount = Math.max(0, Number(merchant?.workerCount) || 0);
-    if (workerCount <= 0) return [];
-
-    return Array.from({ length: workerCount }, (_, idx) => ({
-        id: workerCount > 1 ? `worker-${idx + 1}` : 'solo-worker',
-        name: workerCount > 1 ? `Worker ${idx + 1}` : 'Main Specialist',
-        role: merchant?.category || 'Specialist',
-        image: ''
-    }));
+    return getNormalizedMerchantStaff(merchant, { includeInactive: false, allowLegacyFallback: true });
 }
 
 function getVenueInitials(name = '') {
@@ -6513,7 +7506,7 @@ function renderVenueProfile(merchant, options = {}) {
     const cartTotals = calculateVenueCartTotals(cartItems, products);
     const images = getVenueGalleryImages(merchant);
     const teamMembers = getVenueTeamMembers(merchant);
-    const teamCount = Math.max(teamMembers.length, Math.max(0, Number(merchant.workerCount) || 0));
+    const teamCount = getEffectiveWorkerCapacity(merchant);
     const canPreselectStaff = getBookableStaffOptions(merchant).length > 0;
     const aboutText = String(merchant.description || merchant.about || merchant.bio || '').trim();
     const aboutFallback = `${merchant.name} is available for online booking on Hewrina. Browse services, review the team, and use the location section for directions before you book.`;
