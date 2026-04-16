@@ -1,0 +1,367 @@
+HEWRINA PLATFORM
+Complete Website Guide for Business Owners
+Version: April 11, 2026
+
+=====================================================================
+1) PLATFORM OVERVIEW
+=====================================================================
+Hewrina is a booking + discovery + commerce platform for beauty/wellness
+businesses. The platform supports three role types:
+
+- Customer: discovers stores, books services, buys products, writes reviews.
+- Owner: manages one store (services, staff, products, bookings, orders,
+  calendar, and store financials).
+- Admin: manages all stores, users, offers, sponsors, orders, and financials.
+
+Core stack:
+- Frontend: HTML/CSS/JavaScript (single-page behavior in index.html)
+- Backend: Firebase Firestore + Firebase Auth + Firebase Storage
+
+Main pages:
+- index.html: core app (customer + owner + admin dashboards)
+- about.html: informational page
+- contact.html: contact page (saves messages to Firestore)
+
+=====================================================================
+2) CUSTOMER EXPERIENCE (END-USER)
+=====================================================================
+
+2.1 Discovery and Search
+- Homepage hero with quick action buttons.
+- Enhanced search bar:
+  - Treatment keyword search
+  - Category filter
+  - Sort options (default, rating, reviews, nearest)
+- Filter chips by venue type.
+- Search result info bar with clear action.
+- Split discovery layout:
+  - Left: venues list
+  - Right: inline map panel (toggleable)
+
+2.2 Venue Listing Cards
+Each card can show:
+- Venue image/gallery preview
+- Category tag
+- Rating and review count
+- Address/distance
+- Active discount badge ("Up to X% OFF")
+
+2.3 Maps
+- Dedicated map modal with markers
+- "View on Map" from cards and profile view
+- Inline map mode in discovery layout
+
+2.4 Service Budget Search Wizard
+Multi-step flow:
+- Choose category
+- Choose sub-service
+- Optionally set budget
+- Get matched venues/services
+
+2.5 Venue Profile
+Venue profile now includes tabbed content:
+- Services tab
+- Shop tab
+- Reviews tab
+
+Profile includes:
+- Hero section with gallery, category, rating, address, map action
+- Services by category
+- Discount labels on services
+- Off-peak hints when discount applies only at certain hours
+
+2.6 Booking Wizard (Service Appointments)
+Booking flow is a 4-step flow:
+1. Select services
+2. Select staff
+3. Select date/time
+4. Confirm
+
+Details in booking flow:
+- Service total calculation
+- Staff selection (including "Anyone available")
+- Calendar with availability
+- Time slot capacity (open/partial/full)
+- Cancellation policy checkbox when store policy exists
+- Final confirmation summary with total and discount breakdown
+
+2.7 Smart Deals and Off-Peak Pricing
+- Offers can be all-day or hour-limited (Valid From/Until)
+- Eligible time slots are highlighted as deal slots
+- Deal indicators shown in booking date/time step
+- Correct final discount is applied at booking confirmation
+- Discount metadata is stored with booking for traceability
+
+2.8 Shop and Product Purchase
+- Shop tab shows store products with:
+  - Product name
+  - Price
+  - Stock state
+  - Product image
+- Customer cart supports:
+  - Add to cart
+  - Increment/decrement quantity
+  - Remove item
+  - Subtotal calculation
+- Checkout behavior:
+  - Creates an order document in Firestore
+  - Reduces product stock in store data
+  - Handles out-of-stock protection
+
+2.9 Reviews
+- Customers can submit rating + optional comment
+- Venue profile displays review feed
+- Ratings appear in cards and profile headers
+
+2.10 Customer Account Features
+- Profile modal with tabs:
+  - Personal info
+  - Security/account settings
+  - Visit history
+- My Appointments view:
+  - Upcoming tab
+  - Past tab
+  - Rebook shortcut from past entries
+
+=====================================================================
+3) OWNER DASHBOARD (STORE OWNER)
+=====================================================================
+
+Owner dashboard tabs:
+- Overview
+- Bookings
+- Orders
+- Calendar
+- My Store
+- Financials
+
+3.1 Overview Tab
+- Today's bookings count
+- Pending request count
+- Revenue summary
+- Pending booking action list with quick accept/decline
+
+3.2 Bookings Tab
+- Table view of store bookings
+- Filters by status (all/pending/confirmed/cancelled/completed)
+- Actions:
+  - Accept (pending -> confirmed)
+  - Reject (pending -> cancelled)
+  - Complete (confirmed -> completed)
+
+3.3 Orders Tab (Shop Orders)
+- Table of product orders for the owner's store
+- Filters by status (all/pending/confirmed/fulfilled/cancelled)
+- Status actions:
+  - Confirm order
+  - Fulfill order
+  - Cancel order
+- Cancellation logic restores stock back to products
+
+3.4 Calendar Tab
+- Monthly calendar with booking density markers
+- Day detail panel/modal with bookings list
+- Fast status actions from calendar context
+
+3.5 My Store Tab
+Store profile editing:
+- Name
+- Address
+- Number of workers/stylists
+- Cancellation and no-show policy
+- Store photo
+- Geo location (lat/lng + picker)
+
+Service management:
+- Add/edit/delete services
+- Category, duration, price
+
+Staff management:
+- Add/edit/delete staff
+- Name, role/title, optional profile image
+
+Product management:
+- Add/edit/delete products
+- Name, price, stock, optional image URL
+
+3.6 Financials Tab (Owner)
+- Total revenue
+- Commission due
+- Net earnings
+- Recent transactions list
+- Invoices received from platform/admin
+
+=====================================================================
+4) ADMIN DASHBOARD (PLATFORM ADMIN)
+=====================================================================
+
+Admin dashboard tabs:
+- Stores
+- Offers
+- Sponsors
+- Orders
+- Financials
+- Users
+
+4.1 Stores Tab
+- Create/edit stores
+- View status
+- Suspend/activate stores
+
+4.2 Offers Tab
+- Create promotions for a store service
+- Configure:
+  - Discount percent
+  - Duration (days)
+  - Valid hours (optional off-peak window)
+- Offers list shows:
+  - Store/service
+  - Discount
+  - Valid hours
+  - Duration/state
+  - Status
+
+4.3 Sponsors Tab
+- Store sponsorships (featured venues)
+- External ad sponsorships (image/link/title)
+- Active sponsors shown on customer homepage banner
+
+4.4 Orders Tab (Platform Oversight)
+- Full cross-store view of shop orders
+- Filters by status
+- See store, customer, items, totals, timestamps
+- Can confirm/fulfill/cancel orders globally
+
+4.5 Financials Tab
+- Revenue stats with time-range filter
+- Commission tracking (10%)
+- Pending payouts visibility
+- Invoice generation by store/date range
+- Invoice payment tracking (paid/unpaid sections)
+- Recent completed bookings table
+
+4.6 Users Tab
+- View all users
+- Role filtering (all/customer/owner/admin)
+- Role update/assignment workflow
+- Owner-store assignment support
+
+=====================================================================
+5) ORDER AND BOOKING STATUS MODEL
+=====================================================================
+
+5.1 Booking Statuses
+- pending: customer submitted request
+- confirmed: owner accepted
+- completed: owner marked as done
+- cancelled: rejected/cancelled
+
+5.2 Shop Order Statuses
+- pending: customer placed order
+- confirmed: owner/admin accepted order
+- fulfilled: order delivered/completed
+- cancelled: order cancelled (stock restored)
+
+=====================================================================
+6) PROMOTIONS, DISCOUNTS, AND PRICING LOGIC
+=====================================================================
+
+6.1 Offer Types
+- All-day offer: applies regardless of time
+- Time-window offer: applies only in configured valid hours
+
+6.2 Booking Price Calculation
+- Base total = sum of selected service base prices
+- Discount total = sum of applicable offer discounts for selected slot
+- Final total = base total - discount total
+
+6.3 Slot Highlighting
+- Deal slots are visually marked in time grid
+- Deal slot summary appears in booking step
+
+=====================================================================
+7) FIRESTORE DATA FOOTPRINT (HIGH LEVEL)
+=====================================================================
+
+Main collections used by the platform:
+- users
+- merchants
+- bookings
+- offers
+- sponsors
+- reviews
+- orders
+- storeCalendar
+- storeFinancials
+- storeTransactions
+- invoices
+- messages
+
+Typical entity examples:
+- merchants: store profile + services + staff + products
+- orders: customer, store, item lines, subtotal, status, timestamps
+- bookings: services, staff, date/time, totals, status, commission
+
+=====================================================================
+8) DAILY OPERATIONS CHECKLIST (FOR BUSINESS OWNER)
+=====================================================================
+
+Morning
+1. Open Owner Dashboard -> Overview
+2. Accept/decline pending bookings
+3. Check Orders tab for new product orders
+
+Midday
+1. Update order statuses (confirm/fulfill)
+2. Monitor stock levels in My Store -> Products
+3. Adjust offers if running off-peak campaigns
+
+End of Day
+1. Mark completed appointments in Bookings
+2. Review Financials tab (transactions + invoices)
+3. Verify next-day calendar load
+
+Weekly
+1. Refresh service pricing/menu
+2. Review staff roles and availability
+3. Refresh product inventory and images
+4. Check review trends and respond operationally
+
+=====================================================================
+9) RECOMMENDED ADMIN OPERATING RHYTHM
+=====================================================================
+
+Daily
+- Review Users, Orders, and Sponsors tabs
+- Monitor unusual cancellations or stock issues
+
+Weekly
+- Audit store status (active/suspended)
+- Validate promotions validity windows
+- Reconcile unpaid invoices
+
+Monthly
+- Commission and revenue review
+- Store performance benchmarking
+- Product order volume trend analysis
+
+=====================================================================
+10) CURRENT CAPABILITIES SUMMARY
+=====================================================================
+
+Live capabilities currently include:
+- Customer discovery + booking + reviews + product orders
+- Owner booking/order/store operations and financial visibility
+- Admin control over users/stores/offers/sponsors/orders/financials
+- Smart off-peak deal engine and slot-aware discounting
+- Product shop with stock-aware checkout and inventory deduction/restock
+
+=====================================================================
+11) DELIVERY NOTES FOR THIS DOCUMENT
+=====================================================================
+
+This guide is a full operational snapshot of the website as of April 11, 2026.
+If your team adds new flows (payments, shipping, loyalty, CRM, etc.), update
+this guide version and re-export a new PDF for stakeholders.
+
+END OF GUIDE

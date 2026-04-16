@@ -1,5 +1,5 @@
 import { db, auth, storage } from "./firebase-config.js";
-import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc, deleteDoc, Timestamp, setDoc, orderBy, limit, runTransaction } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { RecaptchaVerifier, signInWithPhoneNumber, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, EmailAuthProvider, reauthenticateWithCredential, updateEmail, updatePassword, updateProfile } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
@@ -18,6 +18,7 @@ const sponsorCarousel = document.getElementById('sponsor-carousel');
 let allMerchants = [];
 let allOffers = [];
 let allSponsors = [];
+let allReviews = [];
 let currentFilter = 'all';
 let currentUser = null;
 let map = null;
@@ -26,6 +27,8 @@ let infoWindow = null;
 let isPickingLocation = false;
 let pickerMarker = null;
 let pickedLocation = null;
+let venueProfileMap = null;
+let venueProfileMapMarker = null;
 
 // Utility: Custom Toast
 window.showToast = function (message, type = 'info') {
@@ -128,7 +131,10 @@ window.showConfirm = function (message) {
 // Initialization
 async function init() {
     setupEventListeners();
+    setupHomepageMotion();
+    updateHomepageMetrics();
     await loadOffersData(); // Load offers first so discounts show on cards
+    await loadReviewsData(); // Load reviews for star ratings on cards
     await loadMerchants();
     loadSponsorsForCustomer();
 
@@ -169,8 +175,591 @@ async function loadOffersData() {
         snapshot.forEach(docSnap => {
             allOffers.push({ id: docSnap.id, ...docSnap.data() });
         });
+        updateHomepageMetrics();
     } catch (error) {
         console.error('Error loading offers:', error);
+    }
+}
+
+function toSafeDate(value) {
+    if (!value) return null;
+    const dateValue = value?.toDate ? value.toDate() : new Date(value);
+    return isNaN(dateValue.getTime()) ? null : dateValue;
+}
+
+function normalizeOfferInputTime(timeValue) {
+    if (!timeValue || typeof timeValue !== 'string') return null;
+    const parts = timeValue.split(':');
+    if (parts.length < 2) return null;
+    const hour = Number(parts[0]);
+    const minute = Number(parts[1]);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return null;
+    }
+    return `${hour}:${String(minute).padStart(2, '0')}`;
+}
+
+function parseTimeToMinutes(timeValue) {
+    const normalized = normalizeOfferInputTime(timeValue);
+    if (!normalized) return null;
+    const [h, m] = normalized.split(':').map(Number);
+    return (h * 60) + m;
+}
+
+function isOfferTimeRestricted(offer) {
+    return parseTimeToMinutes(offer?.validFromTime) !== null && parseTimeToMinutes(offer?.validToTime) !== null;
+}
+
+function formatOfferHours(offer) {
+    if (!isOfferTimeRestricted(offer)) return 'All day';
+    const from = normalizeOfferInputTime(offer.validFromTime);
+    const to = normalizeOfferInputTime(offer.validToTime);
+    if (!from || !to) return 'All day';
+    return `${formatTime12h(from)} - ${formatTime12h(to)}`;
+}
+
+function getBookingDateTime(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return null;
+    const selectedDate = new Date(dateStr);
+    if (isNaN(selectedDate.getTime())) return null;
+    const normalizedTime = normalizeOfferInputTime(timeStr);
+    if (!normalizedTime) return null;
+    const [hours, minutes] = normalizedTime.split(':').map(Number);
+    return new Date(
+        selectedDate.getFullYear(),
+        selectedDate.getMonth(),
+        selectedDate.getDate(),
+        hours,
+        minutes
+    );
+}
+
+function isOfferActiveAt(offer, atDate = new Date()) {
+    if (!offer || !offer.active) return false;
+    const startDate = toSafeDate(offer.startDate);
+    const endDate = toSafeDate(offer.endDate);
+    const checkDate = atDate instanceof Date && !isNaN(atDate.getTime()) ? atDate : new Date();
+    if (startDate && startDate > checkDate) return false;
+    if (endDate && endDate < checkDate) return false;
+    return true;
+}
+
+function isTimeWithinOfferWindow(offer, timeStr) {
+    if (!isOfferTimeRestricted(offer)) return true;
+    const timeMinutes = parseTimeToMinutes(timeStr);
+    const startMinutes = parseTimeToMinutes(offer.validFromTime);
+    const endMinutes = parseTimeToMinutes(offer.validToTime);
+    if (timeMinutes === null || startMinutes === null || endMinutes === null) return false;
+
+    // Handles both same-day windows (10:00-13:00) and overnight windows (22:00-02:00).
+    if (startMinutes < endMinutes) return timeMinutes >= startMinutes && timeMinutes < endMinutes;
+    if (startMinutes > endMinutes) return timeMinutes >= startMinutes || timeMinutes < endMinutes;
+    return true;
+}
+
+function getActiveMerchantOffers(merchantId, atDate = new Date()) {
+    if (!merchantId) return [];
+    return allOffers.filter(offer => offer.storeId === merchantId && isOfferActiveAt(offer, atDate));
+}
+
+function getBestServiceOffer(serviceName, merchantId, atDate, timeStr, options = {}) {
+    if (!serviceName || !merchantId) return null;
+    const { ignoreTimeRestricted = false } = options;
+    const checkDate = atDate instanceof Date && !isNaN(atDate.getTime()) ? atDate : new Date();
+
+    const candidates = getActiveMerchantOffers(merchantId, checkDate).filter(offer => {
+        if (offer.serviceName !== serviceName) return false;
+        if (!isOfferTimeRestricted(offer)) return true;
+        if (ignoreTimeRestricted || !timeStr) return false;
+        return isTimeWithinOfferWindow(offer, timeStr);
+    });
+
+    if (candidates.length === 0) return null;
+    return candidates.reduce((best, current) => {
+        const bestDiscount = Number(best?.discountPercent || 0);
+        const currentDiscount = Number(current?.discountPercent || 0);
+        return currentDiscount > bestDiscount ? current : best;
+    }, null);
+}
+
+function getServiceBasePrice(service) {
+    const value = Number(service?.basePrice ?? service?.price ?? 0);
+    return Number.isFinite(value) ? value : 0;
+}
+
+function calculateBookingPricing(options = {}) {
+    const merchantId = bookingState?.merchant?.id;
+    const dateStr = options.dateStr ?? bookingState.date;
+    const timeStr = options.timeStr ?? bookingState.time;
+    const includeTimeRestricted = options.includeTimeRestricted ?? true;
+    const selectedDateTime = getBookingDateTime(dateStr, timeStr) || new Date();
+
+    const services = bookingState.services || [];
+    const baseTotal = services.reduce((sum, service) => sum + getServiceBasePrice(service), 0);
+    const totalDuration = services.reduce((sum, service) => sum + (Number(service.duration) || 0), 0);
+
+    let discountTotal = 0;
+    const appliedOffers = [];
+
+    services.forEach(service => {
+        const basePrice = getServiceBasePrice(service);
+        const offer = getBestServiceOffer(service.name, merchantId, selectedDateTime, timeStr, {
+            ignoreTimeRestricted: !includeTimeRestricted
+        });
+        if (!offer) return;
+
+        const discountPercent = Number(offer.discountPercent) || 0;
+        if (discountPercent <= 0) return;
+
+        const discountAmount = Math.round(basePrice * (discountPercent / 100));
+        if (discountAmount <= 0) return;
+
+        discountTotal += discountAmount;
+        appliedOffers.push({
+            serviceName: service.name,
+            discountPercent,
+            discountAmount,
+            validFromTime: offer.validFromTime || null,
+            validToTime: offer.validToTime || null
+        });
+    });
+
+    const finalTotal = Math.max(0, baseTotal - discountTotal);
+    return { baseTotal, discountTotal, finalTotal, totalDuration, appliedOffers };
+}
+
+function calculateTotal(options = {}) {
+    return calculateBookingPricing(options).finalTotal;
+}
+
+function formatCompactStat(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return '0';
+    if (numericValue >= 1000) {
+        return `${(numericValue / 1000).toFixed(numericValue >= 10000 ? 0 : 1).replace(/\.0$/, '')}k`;
+    }
+    return numericValue.toLocaleString();
+}
+
+function setHomepageMetricValue(id, value) {
+    const element = document.getElementById(id);
+    if (!element) return;
+
+    const numericValue = Math.max(0, Number(value) || 0);
+    const previousValue = Number(element.dataset.rawValue || 0);
+    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+
+    if (prefersReducedMotion || previousValue === numericValue) {
+        element.textContent = formatCompactStat(numericValue);
+        element.dataset.rawValue = String(numericValue);
+        return;
+    }
+
+    if (element._countRaf) {
+        cancelAnimationFrame(element._countRaf);
+    }
+
+    const startValue = Number.isFinite(previousValue) ? previousValue : 0;
+    const duration = 700;
+    const startTime = performance.now();
+    element.dataset.rawValue = String(numericValue);
+
+    const tick = (now) => {
+        const progress = Math.min((now - startTime) / duration, 1);
+        const currentValue = Math.round(startValue + ((numericValue - startValue) * progress));
+        element.textContent = formatCompactStat(currentValue);
+        if (progress < 1) {
+            element._countRaf = requestAnimationFrame(tick);
+        } else {
+            element._countRaf = null;
+        }
+    };
+
+    element._countRaf = requestAnimationFrame(tick);
+}
+
+function updateHomepageMetrics() {
+    const totalServices = allMerchants.reduce((sum, merchant) => sum + ((merchant.services || []).length), 0);
+    const liveOffers = allOffers.filter(offer => isOfferActiveAt(offer, new Date())).length;
+
+    setHomepageMetricValue('home-stat-venues', allMerchants.length);
+    setHomepageMetricValue('home-stat-services', totalServices);
+    setHomepageMetricValue('home-stat-reviews', allReviews.length);
+    setHomepageMetricValue('home-stat-offers', liveOffers);
+}
+
+function setupHomepageMotion() {
+    const revealTargets = document.querySelectorAll('[data-reveal]');
+    if (!revealTargets.length) return;
+
+    revealTargets.forEach((element, index) => {
+        element.style.setProperty('--reveal-delay', `${Math.min(index * 70, 280)}ms`);
+    });
+
+    if (!('IntersectionObserver' in window) || window.matchMedia?.('(max-width: 768px)')?.matches) {
+        revealTargets.forEach(element => element.classList.add('is-visible'));
+        return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            entry.target.classList.add('is-visible');
+            observer.unobserve(entry.target);
+        });
+    }, { threshold: 0.12, rootMargin: '0px 0px 180px 0px' });
+
+    revealTargets.forEach(element => observer.observe(element));
+}
+
+window.quickSearchCategory = function(category) {
+    const categoryInput = document.getElementById('search-category');
+    const treatmentInput = document.getElementById('search-treatment');
+    const sortInput = document.getElementById('search-sort');
+
+    if (categoryInput) categoryInput.value = category;
+    if (treatmentInput) treatmentInput.value = '';
+    if (sortInput) sortInput.value = 'default';
+
+    performSearch();
+    document.getElementById('explore')?.scrollIntoView({ behavior: 'smooth' });
+};
+
+const SEARCH_TERM_ALIASES = {
+    hair: ['haircut', 'cut', 'trim', 'fade', 'blowout', 'balayage', 'color', 'keratin', 'barber', 'styling'],
+    haircut: ['cut', 'trim', 'fade', 'barber'],
+    facial: ['skin', 'hydrafacial', 'cleansing', 'glow', 'peel', 'microdermabrasion'],
+    nails: ['nail', 'manicure', 'pedicure', 'gel', 'acrylic', 'extensions', 'polish'],
+    massage: ['swedish', 'deep tissue', 'hot stone', 'aromatherapy', 'body massage', 'back massage'],
+    makeup: ['bridal', 'party makeup', 'airbrush', 'lashes', 'contouring'],
+    brows: ['brow', 'brows', 'eyebrow', 'lash', 'lashes', 'threading', 'lamination', 'tint'],
+    laser: ['laser hair removal', 'botox', 'filler', 'prp', 'carbon peel', 'mesotherapy', 'rf lifting'],
+    waxing: ['wax', 'waxing', 'threading', 'underarm wax', 'facial wax'],
+    barber: ['haircut', 'fade', 'trim', 'beard'],
+    skin: ['facial', 'glow', 'hydrafacial', 'peel', 'acne treatment']
+};
+
+function normalizeTextForSearch(value) {
+    return String(value || '')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/&/g, ' and ')
+        .replace(/[^a-zA-Z0-9\s]/g, ' ')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function getSearchTokens(value) {
+    return normalizeTextForSearch(value)
+        .split(' ')
+        .map(token => token.trim())
+        .filter(token => token.length >= 2);
+}
+
+function getAliasGroupForToken(token) {
+    const normalizedToken = normalizeTextForSearch(token);
+    const group = new Set();
+    if (!normalizedToken) return group;
+
+    group.add(normalizedToken);
+
+    Object.entries(SEARCH_TERM_ALIASES).forEach(([root, aliases]) => {
+        const normalizedRoot = normalizeTextForSearch(root);
+        const normalizedAliases = aliases.map(alias => normalizeTextForSearch(alias)).filter(Boolean);
+        const matchesRoot = normalizedToken === normalizedRoot
+            || normalizedRoot.includes(normalizedToken)
+            || normalizedToken.includes(normalizedRoot);
+        const matchesAlias = normalizedAliases.some(alias =>
+            alias === normalizedToken
+            || alias.includes(normalizedToken)
+            || normalizedToken.includes(alias)
+        );
+
+        if (!matchesRoot && !matchesAlias) return;
+
+        group.add(normalizedRoot);
+        normalizedAliases.forEach(alias => group.add(alias));
+    });
+
+    return group;
+}
+
+function doesNormalizedSearchTextMatchQuery(searchText, query) {
+    const normalizedSearchText = normalizeTextForSearch(searchText);
+    const normalizedQuery = normalizeTextForSearch(query);
+    if (!normalizedQuery) return true;
+    if (normalizedSearchText.includes(normalizedQuery)) return true;
+
+    const tokenGroups = getSearchTokens(normalizedQuery).map(getAliasGroupForToken);
+    if (tokenGroups.length === 0) return true;
+
+    return tokenGroups.every(group => Array.from(group).some(term => normalizedSearchText.includes(term)));
+}
+
+function buildMerchantSearchBlob(merchant) {
+    const services = Array.isArray(merchant?.services) ? merchant.services : [];
+    const staff = Array.isArray(merchant?.staff) ? merchant.staff : [];
+    const offers = allOffers.filter(offer => offer.storeId === merchant?.id);
+
+    return normalizeTextForSearch([
+        merchant?.name,
+        merchant?.address,
+        merchant?.category,
+        merchant?.type,
+        merchant?.description,
+        merchant?.about,
+        merchant?.bio,
+        ...services.flatMap(service => [service?.name, service?.category]),
+        ...staff.flatMap(member => [member?.name, member?.role]),
+        ...offers.map(offer => offer?.serviceName)
+    ].filter(Boolean).join(' '));
+}
+
+function normalizeStaffCollection(staffArray = []) {
+    return (Array.isArray(staffArray) ? staffArray : [])
+        .map((staff, idx) => {
+            const normalized = normalizeStaffMember({
+                id: staff?.id || `staff-${idx}`,
+                name: staff?.name,
+                role: staff?.role,
+                image: staff?.image
+            });
+            if (!normalized) return null;
+            return {
+                ...normalized,
+                active: staff?.active !== false
+            };
+        })
+        .filter(Boolean);
+}
+
+function getLegacyStaffFallback(merchant) {
+    const workerCount = Math.max(0, Number(merchant?.workerCount) || 0);
+    if (workerCount <= 0) return [];
+
+    return Array.from({ length: workerCount }, (_, idx) => ({
+        id: workerCount > 1 ? `worker-${idx + 1}` : 'solo-worker',
+        name: workerCount > 1 ? `Worker ${idx + 1}` : 'Main Specialist',
+        role: workerCount > 1 ? 'Team Member' : (merchant?.category || 'Specialist'),
+        image: '',
+        active: true,
+        isLegacyFallback: true
+    }));
+}
+
+function getNormalizedMerchantStaff(merchant, { includeInactive = false, allowLegacyFallback = true } = {}) {
+    const normalizedStaff = normalizeStaffCollection(merchant?.staff);
+    const filteredStaff = includeInactive ? normalizedStaff : normalizedStaff.filter(staff => staff.active !== false);
+
+    if (filteredStaff.length > 0) return filteredStaff;
+    if (allowLegacyFallback) return getLegacyStaffFallback(merchant);
+    return [];
+}
+
+function getPersistedWorkerCount(staffArray = []) {
+    const activeStaffCount = normalizeStaffCollection(staffArray).filter(staff => staff.active !== false).length;
+    return Math.max(1, activeStaffCount || 1);
+}
+
+function getLegacyAwareWorkerCount(merchant) {
+    const explicitStaffCount = normalizeStaffCollection(merchant?.staff).filter(staff => staff.active !== false).length;
+    if (explicitStaffCount > 0) return explicitStaffCount;
+
+    const legacyCount = Math.max(0, Number(merchant?.workerCount) || 0);
+    return Math.max(1, legacyCount || 1);
+}
+
+function getEffectiveWorkerCapacity(merchant) {
+    return getLegacyAwareWorkerCount(merchant);
+}
+
+function getBookableStaffOptions(merchant = bookingState.merchant) {
+    return getNormalizedMerchantStaff(merchant, { includeInactive: false, allowLegacyFallback: true });
+}
+
+function getAutomaticStaffChoice() {
+    return {
+        id: 'anyone',
+        name: 'Any available worker',
+        role: 'Automatically assigned',
+        image: ''
+    };
+}
+
+function normalizeStaffMember(staff) {
+    if (!staff) return null;
+
+    const id = staff.id != null ? String(staff.id).trim() : '';
+    const name = String(staff.name || '').trim();
+    if (!id && !name) return null;
+
+    return {
+        id: id || `staff-${name.toLowerCase().replace(/\s+/g, '-')}`,
+        name: name || 'Assigned Staff',
+        role: String(staff.role || '').trim(),
+        image: String(staff.image || '').trim()
+    };
+}
+
+function hasSpecificStaffSelection() {
+    return !!bookingState.selectedStaff && bookingState.selectedStaff.id !== 'anyone';
+}
+
+function doesBookingMatchSelectedStaff(bookingData, selectedStaff = bookingState.selectedStaff) {
+    if (!selectedStaff || selectedStaff.id === 'anyone') return true;
+
+    const bookingStaffId = bookingData?.staffMember?.id != null ? String(bookingData.staffMember.id) : '';
+    const bookingStaffName = (bookingData?.staffMember?.name || '').trim().toLowerCase();
+    const selectedStaffId = String(selectedStaff.id);
+    const selectedStaffName = (selectedStaff.name || '').trim().toLowerCase();
+
+    if (!bookingStaffId || bookingStaffId === 'anyone') {
+        return false;
+    }
+
+    return bookingStaffId === selectedStaffId || (bookingStaffName && bookingStaffName === selectedStaffName);
+}
+
+function getNormalizedBookingStatus(status) {
+    return String(status || '').trim().toLowerCase();
+}
+
+function isCancelledBookingStatus(status) {
+    const normalizedStatus = getNormalizedBookingStatus(status);
+    return normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
+}
+
+function getBookingDateValue(bookingLike) {
+    const value = bookingLike?.bookingDate ?? bookingLike;
+    if (!value) return null;
+    if (typeof value?.toDate === 'function') return value.toDate();
+
+    const parsed = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getBookingTimeKey(bookingLike) {
+    const rawTime = String(bookingLike?.bookingTime || bookingLike?.time || '').trim();
+    if (rawTime) return rawTime;
+
+    const bookingDate = getBookingDateValue(bookingLike);
+    if (!bookingDate) return '';
+    return `${bookingDate.getHours()}:${String(bookingDate.getMinutes()).padStart(2, '0')}`;
+}
+
+function isSameBookingSlot(bookingLike, targetDate, targetTimeKey) {
+    const bookingDate = getBookingDateValue(bookingLike);
+    if (!bookingDate) return false;
+
+    return bookingDate.getFullYear() === targetDate.getFullYear()
+        && bookingDate.getMonth() === targetDate.getMonth()
+        && bookingDate.getDate() === targetDate.getDate()
+        && getBookingTimeKey(bookingLike) === targetTimeKey;
+}
+
+function resolveRequestedStaffMember(staffOptions, selectedStaff) {
+    const normalizedSelectedStaff = normalizeStaffMember(selectedStaff);
+    if (!normalizedSelectedStaff || normalizedSelectedStaff.id === 'anyone') return null;
+
+    return staffOptions.find(staff => String(staff.id) === normalizedSelectedStaff.id)
+        || staffOptions.find(staff => String(staff.name || '').trim().toLowerCase() === normalizedSelectedStaff.name.toLowerCase())
+        || null;
+}
+
+function pickAutomaticallyAssignedStaff(staffOptions, seedValue = 0) {
+    if (!Array.isArray(staffOptions) || staffOptions.length === 0) return null;
+    const normalizedSeed = Math.abs(Number(seedValue) || 0);
+    return staffOptions[normalizedSeed % staffOptions.length];
+}
+
+function getBookingDateKey(dateValue) {
+    const bookingDate = getBookingDateValue(dateValue);
+    if (!bookingDate) return '';
+
+    const year = bookingDate.getFullYear();
+    const month = String(bookingDate.getMonth() + 1).padStart(2, '0');
+    const day = String(bookingDate.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function getBookingSlotDocId(storeId, dateValue, timeKey) {
+    const dateKey = getBookingDateKey(dateValue);
+    const normalizedTime = String(timeKey || '').replace(/:/g, '-');
+    return `${storeId}_${dateKey}_${normalizedTime}`;
+}
+
+function getBookingSlotRef(storeId, dateValue, timeKey) {
+    return doc(db, "bookingSlotAvailability", getBookingSlotDocId(storeId, dateValue, timeKey));
+}
+
+function getSlotAvailabilityState(slotSnap) {
+    const slotData = slotSnap?.exists?.() ? slotSnap.data() : {};
+
+    return {
+        slotData,
+        totalBookings: Math.max(0, Number(slotData.totalBookings) || 0),
+        occupiedStaffIds: Array.isArray(slotData.occupiedStaffIds) ? slotData.occupiedStaffIds.map(id => String(id)) : [],
+        occupiedStaffNames: Array.isArray(slotData.occupiedStaffNames)
+            ? slotData.occupiedStaffNames.map(name => String(name).trim().toLowerCase()).filter(Boolean)
+            : [],
+        bookingIds: Array.isArray(slotData.bookingIds) ? slotData.bookingIds.map(id => String(id)) : []
+    };
+}
+
+async function refreshBookedSlotsForCurrentSelection() {
+    if (!bookingState?.merchant?.id || !bookingState.date) return;
+    bookingState.bookedSlots = undefined;
+    renderBookingWizard();
+    const bookedSlots = await fetchBookedSlots(bookingState.merchant.id, bookingState.date);
+    bookingState.bookedSlots = bookedSlots;
+    renderBookingWizard();
+}
+
+function getSlotDiscountSummary(timeStr, dateStr = bookingState.date) {
+    if (!bookingState?.merchant?.id || !dateStr || !Array.isArray(bookingState.services) || bookingState.services.length === 0) {
+        return { hasDiscount: false };
+    }
+
+    const slotDate = getBookingDateTime(dateStr, timeStr);
+    if (!slotDate) return { hasDiscount: false };
+
+    let maxDiscount = 0;
+    let discountedServices = 0;
+
+    bookingState.services.forEach(service => {
+        const offer = getBestServiceOffer(service.name, bookingState.merchant.id, slotDate, timeStr, {
+            ignoreTimeRestricted: false
+        });
+        if (!offer) return;
+        discountedServices++;
+        maxDiscount = Math.max(maxDiscount, Number(offer.discountPercent) || 0);
+    });
+
+    if (discountedServices === 0 || maxDiscount <= 0) {
+        return { hasDiscount: false };
+    }
+
+    const serviceSuffix = discountedServices > 1 ? ` • ${discountedServices} services` : '';
+    return {
+        hasDiscount: true,
+        maxDiscount,
+        discountedServices,
+        label: `${maxDiscount}% OFF${serviceSuffix}`
+    };
+}
+
+async function loadReviewsData() {
+    try {
+        const snapshot = await getDocs(collection(db, "reviews"));
+        allReviews = [];
+        snapshot.forEach(docSnap => {
+            allReviews.push({ id: docSnap.id, ...docSnap.data() });
+        });
+        console.log(`Loaded ${allReviews.length} reviews`);
+        updateHomepageMetrics();
+    } catch (error) {
+        console.error('Error loading reviews:', error);
     }
 }
 
@@ -268,6 +857,89 @@ function setupEventListeners() {
     let authStep = 'choice';
     let tempAuthData = null;
 
+    function isLocalDevelopmentHost() {
+        const host = String(window.location.hostname || '').toLowerCase();
+        return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    }
+
+    function normalizeIraqiPhoneInput(value) {
+        const digits = String(value || '').replace(/\D/g, '');
+        if (!digits) return null;
+
+        let normalized = digits;
+        if (normalized.startsWith('964') && normalized.length === 13) {
+            normalized = normalized.slice(3);
+        }
+        if (normalized.startsWith('0') && normalized.length === 11) {
+            normalized = normalized.slice(1);
+        }
+
+        if (!/^7\d{9}$/.test(normalized)) return null;
+        return normalized;
+    }
+
+    function formatIraqiE164Phone(localPhone) {
+        return `+964${localPhone}`;
+    }
+
+    function getPhoneAuthErrorMessage(error) {
+        const code = String(error?.code || '');
+
+        if (code === 'auth/invalid-phone-number') {
+            return 'Invalid phone number. Use Iraqi mobile format like 750xxxxxxx or 0750xxxxxxx.';
+        }
+        if (code === 'auth/too-many-requests') {
+            return 'Too many verification attempts. Wait a while and try again.';
+        }
+        if (code === 'auth/quota-exceeded') {
+            return 'Firebase SMS quota is exhausted for this project.';
+        }
+        if (code === 'auth/captcha-check-failed' || code === 'auth/invalid-app-credential') {
+            return 'reCAPTCHA verification failed. Reload the page and try again.';
+        }
+        if (code === 'auth/operation-not-allowed') {
+            return 'Phone authentication is not enabled in Firebase Authentication.';
+        }
+        if (code === 'auth/unauthorized-domain') {
+            return `This domain (${window.location.hostname}) is not authorized for Firebase phone authentication.`;
+        }
+        if (code === 'auth/app-not-authorized') {
+            return 'This app is not authorized to use Firebase phone authentication.';
+        }
+
+        return error?.message || 'Unable to send the verification code.';
+    }
+
+    function ensureAuthPhoneFieldHints() {
+        ['reg-phone', 'login-phone'].forEach((fieldId) => {
+            const input = document.getElementById(fieldId);
+            if (!input) return;
+            input.setAttribute('inputmode', 'numeric');
+            input.setAttribute('autocomplete', 'tel');
+            input.setAttribute('maxlength', '11');
+        });
+
+        const registerForm = document.getElementById('auth-form-register');
+        if (registerForm && !document.getElementById('auth-phone-format-note')) {
+            const note = document.createElement('p');
+            note.id = 'auth-phone-format-note';
+            note.style.cssText = 'margin-top: 10px; font-size: 0.82rem; color: #6b7280; line-height: 1.5;';
+            note.textContent = 'Phone format: 750xxxxxxx or 0750xxxxxxx.';
+            registerForm.appendChild(note);
+        }
+
+        const recaptchaContainer = document.getElementById('recaptcha-container');
+        if (recaptchaContainer && isLocalDevelopmentHost() && !document.getElementById('auth-localhost-note')) {
+            const localNote = document.createElement('p');
+            localNote.id = 'auth-localhost-note';
+            localNote.style.cssText = 'margin-top: 12px; font-size: 0.82rem; color: #b45309; line-height: 1.5;';
+            localNote.textContent = 'Local development note: Firebase phone auth does not send real SMS codes from localhost. Use a deployed domain or Firebase test phone numbers.';
+            recaptchaContainer.insertAdjacentElement('afterend', localNote);
+        }
+    }
+
+    ensureAuthPhoneFieldHints();
+
 
     // 1. Initialize ReCAPTCHA
     if (!window.recaptchaVerifier) {
@@ -320,15 +992,20 @@ function setupEventListeners() {
         regForm.onsubmit = async (e) => {
             e.preventDefault();
             const name = document.getElementById('reg-name').value.trim();
-            const phone = document.getElementById('reg-phone').value.trim();
+            const rawPhone = document.getElementById('reg-phone').value.trim();
             const password = document.getElementById('reg-password').value;
+            const phone = normalizeIraqiPhoneInput(rawPhone);
 
-            if (phone.length < 10) {
-                showToast('Please enter a valid phone number', 'error');
+            if (!phone) {
+                showToast('Enter Iraqi mobile format like 750xxxxxxx or 0750xxxxxxx.', 'error');
                 return;
             }
             if (password.length < 6) {
                 showToast('Password must be at least 6 characters', 'error');
+                return;
+            }
+            if (isLocalDevelopmentHost()) {
+                showToast('Real SMS verification does not work on localhost. Use a deployed domain or configure Firebase test phone numbers.', 'error');
                 return;
             }
 
@@ -343,19 +1020,21 @@ function setupEventListeners() {
                 // Proceed to verify
                 const appVerifier = window.recaptchaVerifier;
                 // OTP Step is ONLY for registration
-                signInWithPhoneNumber(auth, '+964' + phone, appVerifier)
-                    .then((confirmationResult) => {
-                        window.confirmationResult = confirmationResult;
-                        tempAuthData = { type: 'register', name, phone, password };
-                        showAuthStep('verify');
-                        showToast('Verification code sent!', 'success');
-                    }).catch((error) => {
-                        console.error("SMS Error:", error);
-                        showToast("Error sending SMS: " + error.message, 'error');
+                try {
+                    const confirmationResult = await signInWithPhoneNumber(auth, formatIraqiE164Phone(phone), appVerifier);
+                    window.confirmationResult = confirmationResult;
+                    tempAuthData = { type: 'register', name, phone, password };
+                    showAuthStep('verify');
+                    showToast('Verification code sent!', 'success');
+                } catch (error) {
+                    console.error("SMS Error:", error);
+                    showToast(getPhoneAuthErrorMessage(error), 'error');
+                    if (window.recaptchaVerifier?.render && typeof grecaptcha !== 'undefined') {
                         window.recaptchaVerifier.render().then(function (widgetId) {
                             grecaptcha.reset(widgetId);
-                        });
-                    });
+                        }).catch(() => {});
+                    }
+                }
 
             } catch (error) {
                 console.error("Auth Error:", error);
@@ -369,11 +1048,12 @@ function setupEventListeners() {
     if (loginForm) {
         loginForm.onsubmit = async (e) => {
             e.preventDefault();
-            const phone = document.getElementById('login-phone').value.trim();
+            const rawPhone = document.getElementById('login-phone').value.trim();
+            const phone = normalizeIraqiPhoneInput(rawPhone);
             const password = document.getElementById('login-password').value;
 
-            if (phone.length < 10) {
-                showToast('Please enter a valid phone number', 'error');
+            if (!phone) {
+                showToast('Enter Iraqi mobile format like 750xxxxxxx or 0750xxxxxxx.', 'error');
                 return;
             }
 
@@ -481,6 +1161,7 @@ async function checkUserExists(phone) {
 
 function updateUIForUser() {
     if (!currentUser) return;
+    resetTransientUIState();
     if (loginBtn) loginBtn.style.display = 'none';
     const profileDiv = document.getElementById('user-profile');
     const userNameSpan = document.getElementById('user-name');
@@ -493,11 +1174,9 @@ function updateUIForUser() {
     const mainNav = document.getElementById('main-nav-links');
     const mapBtn = document.getElementById('map-btn');
     if (currentUser.role === 'owner' || currentUser.role === 'admin') {
-        // Hard-remove elements to definitively hide them regardless of CSS cache or flexbox
-        if (mainNav) mainNav.remove(); 
-        if (mapBtn) mapBtn.remove();
+        if (mainNav) mainNav.style.display = 'none';
+        if (mapBtn) mapBtn.style.display = 'none';
     } else {
-        // Customers and guests see these naturally.
         if (mainNav) mainNav.style.display = 'flex';
         if (mapBtn) mapBtn.style.display = 'block';
     }
@@ -526,6 +1205,8 @@ function updateUIForUser() {
         if (custDash) custDash.style.display = 'block';
         if (ownerDash) ownerDash.style.display = 'none';
         if (adminDash) adminDash.style.display = 'none';
+        const navMyAppts = document.getElementById('nav-my-appointments');
+        if (navMyAppts) navMyAppts.style.display = 'flex';
     }
 }
 
@@ -564,6 +1245,7 @@ async function loadMerchants() {
         querySnapshot.forEach((doc) => {
             allMerchants.push({ id: doc.id, ...doc.data() });
         });
+        updateHomepageMetrics();
         renderMerchants();
     } catch (error) {
         console.error("Error loading merchants:", error);
@@ -572,6 +1254,24 @@ async function loadMerchants() {
 }
 
 // Render Grid with Photos
+function getStoreRating(storeId) {
+    const storeReviews = allReviews.filter(r => r.storeId === storeId);
+    if (storeReviews.length === 0) return { avg: 0, count: 0 };
+    const sum = storeReviews.reduce((acc, r) => acc + (r.rating || 0), 0);
+    return { avg: (sum / storeReviews.length).toFixed(1), count: storeReviews.length };
+}
+
+function generateStarHTML(rating, maxStars = 5) {
+    let html = '';
+    const fullStars = Math.floor(rating);
+    const hasHalf = rating - fullStars >= 0.3;
+    for (let i = 0; i < fullStars; i++) html += '★';
+    if (hasHalf && fullStars < maxStars) html += '★';
+    const remaining = maxStars - fullStars - (hasHalf ? 1 : 0);
+    for (let i = 0; i < remaining; i++) html += '☆';
+    return html;
+}
+
 function renderMerchants() {
     const filtered = currentFilter === 'all'
         ? allMerchants
@@ -590,13 +1290,19 @@ function renderMerchants() {
 
         // Check if this merchant has active offers
         const now = new Date();
-        const merchantOffers = allOffers.filter(o => {
-            if (o.storeId !== merchant.id) return false;
-            const endDate = o.endDate?.toDate ? o.endDate.toDate() : new Date(o.endDate);
-            return endDate > now && o.active;
-        });
+        const merchantOffers = getActiveMerchantOffers(merchant.id, now);
         const hasDiscount = merchantOffers.length > 0;
         const maxDiscount = hasDiscount ? Math.max(...merchantOffers.map(o => o.discountPercent)) : 0;
+
+        // Get star rating
+        const rating = getStoreRating(merchant.id);
+        const ratingHTML = rating.count > 0
+            ? `<div class="card-rating">
+                    <span class="stars">${generateStarHTML(parseFloat(rating.avg))}</span>
+                    <span class="rating-score">${rating.avg}</span>
+                    <span class="rating-count">(${rating.count})</span>
+               </div>`
+            : `<div class="card-rating"><span class="rating-count" style="color:#9ca3af;">No reviews yet</span></div>`;
 
         return `
         <div class="merchant-card" onclick="openMerchantDetails('${merchant.id}')">
@@ -607,6 +1313,7 @@ function renderMerchants() {
             <div class="card-body">
                 <span class="card-tag">${merchant.category}</span>
                 <h3 class="card-title">${merchant.name}</h3>
+                ${ratingHTML}
                 <div class="card-meta">
                     <span>${merchant.distance}</span>
                 </div>
@@ -665,6 +1372,13 @@ function initMap() {
     addMarkersToMap();
 }
 
+function getMerchantCoordinates(merchant) {
+    const lat = Number(merchant?.lat);
+    const lng = Number(merchant?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+}
+
 // Add markers for all merchants
 function addMarkersToMap() {
     // Clear existing markers
@@ -674,12 +1388,13 @@ function addMarkersToMap() {
     if (!map) return;
 
     allMerchants.forEach(merchant => {
-        if (!merchant.lat || !merchant.lng) return;
+        const coords = getMerchantCoordinates(merchant);
+        if (!coords) return;
 
         const markerColor = merchant.type === 'salon' ? '#9d4edd' : '#e0aaff';
 
         const marker = new google.maps.Marker({
-            position: { lat: merchant.lat, lng: merchant.lng },
+            position: coords,
             map: map,
             title: merchant.name,
             icon: {
@@ -764,7 +1479,13 @@ window.confirmRealBooking = async function (storeId, storeName, serviceName, pri
 // Show specific merchant on map
 window.showOnMap = function (id) {
     const merchant = allMerchants.find(m => m.id === id);
-    if (!merchant || !merchant.lat || !merchant.lng) return;
+    const coords = getMerchantCoordinates(merchant);
+    if (!merchant || !coords) return;
+
+    if (!window.google?.maps) {
+        window.open(`https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lng}`, '_blank', 'noopener');
+        return;
+    }
 
     mapModal.style.display = 'flex';
 
@@ -772,7 +1493,8 @@ window.showOnMap = function (id) {
         initMap();
         // Wait for map to initialize then center
         setTimeout(() => {
-            map.setCenter({ lat: merchant.lat, lng: merchant.lng });
+            google.maps.event.trigger(map, 'resize');
+            map.setCenter(coords);
             map.setZoom(15);
             // Find and click the marker
             const marker = markers.find(m => m.getTitle() === merchant.name);
@@ -781,7 +1503,8 @@ window.showOnMap = function (id) {
             }
         }, 300);
     } else {
-        map.setCenter({ lat: merchant.lat, lng: merchant.lng });
+        google.maps.event.trigger(map, 'resize');
+        map.setCenter(coords);
         map.setZoom(15);
         const marker = markers.find(m => m.getTitle() === merchant.name);
         if (marker) {
@@ -796,88 +1519,97 @@ window.initMapCallback = function () {
 }
 
 // Global scope for HTML access
-// Global scope for HTML access
 let bookingState = {
     merchant: null,
     services: [],
+    selectedStaff: null,
     date: null,
     time: null,
     step: 1,
-    bookedSlots: null
+    bookedSlots: null,
+    policyAgreed: false,
+    autoAssignSeed: null
 };
 
-window.openMerchantDetails = function (id, preselectedServiceJson = null) {
-    const merchant = allMerchants.find(m => m.id === id);
-    if (!merchant) return;
-
-    let initialServices = [];
-    if (preselectedServiceJson) {
-        try {
-            const preselectedService = JSON.parse(decodeURIComponent(preselectedServiceJson));
-            const now = new Date();
-            
-            // Apply offer discount if available
-            const merchantOffers = allOffers.filter(o => {
-                if (o.storeId !== merchant.id) return false;
-                const endDate = o.endDate?.toDate ? o.endDate.toDate() : new Date(o.endDate);
-                return endDate > now && o.active;
-            });
-            const offer = merchantOffers.find(o => o.serviceName === preselectedService.name);
-            const discountPercent = offer ? offer.discountPercent : 0;
-            const currentPrice = offer ? Math.round(preselectedService.price * (1 - discountPercent / 100)) : preselectedService.price;
-            
-            initialServices.push({
-                name: preselectedService.name,
-                price: currentPrice,
-                duration: preselectedService.duration
-            });
-        } catch(e) {
-            console.error("Failed to parse preselected service:", e);
-        }
-    }
-
-    // Reset State
-    // Clear booked slots cache for fresh data
-    bookedSlotsCache = {};
+function resetBookingState() {
     bookingState = {
-        merchant: merchant,
-        services: initialServices,
+        merchant: null,
+        services: [],
+        selectedStaff: null,
         date: null,
         time: null,
         step: 1,
-        bookedSlots: null
+        bookedSlots: null,
+        policyAgreed: false,
+        autoAssignSeed: null
     };
+    bookingCalendarMonth = new Date();
+    bookedSlotsCache = {};
+}
 
-    renderBookingWizard();
-    document.getElementById('booking-modal').style.display = 'flex';
+function resetTransientUIState() {
+    document.querySelectorAll('.modal').forEach(modal => {
+        modal.style.display = 'none';
+    });
+
+    const venueProfileView = document.getElementById('venue-profile-view');
+    if (venueProfileView) {
+        venueProfileView.style.display = 'none';
+    }
+
+    const dropdownMenu = document.getElementById('user-dropdown-menu');
+    if (dropdownMenu) {
+        dropdownMenu.style.display = 'none';
+    }
+
+    isPickingLocation = false;
+    pickedLocation = null;
+    if (pickerMarker) {
+        pickerMarker.setMap(null);
+        pickerMarker = null;
+    }
+
+    const confirmLocationBtn = document.getElementById('btn-confirm-location');
+    if (confirmLocationBtn) {
+        confirmLocationBtn.style.display = 'none';
+    }
+
+    resetBookingState();
 }
 
 function renderBookingWizard() {
     const body = document.getElementById('booking-modal-body');
     const footer = document.getElementById('booking-modal-footer');
+    const includesStaffStep = getBookableStaffOptions(bookingState.merchant).length > 1;
+    const progressStepTotal = includesStaffStep ? 3 : 2;
     
-    // Hide default close button for step 3 if we want to show our own top bar
+    // Hide default close button for step 4 if we want to show our own top bar
     const defaultCloseBtn = document.querySelector('.close-booking');
     if (defaultCloseBtn) {
-        defaultCloseBtn.style.display = bookingState.step === 3 ? 'none' : 'block';
+        defaultCloseBtn.style.display = bookingState.step === 4 ? 'none' : 'block';
     }
 
     let content = '';
 
-    if (bookingState.step === 3) {
-        // Step 3 specific top bar
+    if (bookingState.step === 4) {
+        // Step 4 specific top bar
         content += `
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #f0f0f0; padding-bottom: 15px; margin-bottom: 20px;">
-                <h3 style="margin: 0; font-weight: 700; font-size: 1.1rem; color: #333;">Book Appointment</h3>
+                <h3 style="margin: 0; font-weight: 700; font-size: 1.1rem; color: #333;">Confirm Appointment</h3>
                 <span style="font-size: 1.5rem; cursor: pointer; color: #888; line-height: 1;" onclick="closeModal('booking-modal')">&times;</span>
             </div>
         `;
     } else {
-        // Header (Static for steps 1 and 2)
+        // Header (Static for steps 1, 2 and 3)
+        let headerStepText = '';
+        if (bookingState.step === 1) headerStepText = `Step 1 of ${progressStepTotal}: Select Services`;
+        if (bookingState.step === 2) headerStepText = `Step 2 of ${progressStepTotal}: Select Staff`;
+        if (bookingState.step === 3) headerStepText = `Step ${includesStaffStep ? 3 : 2} of ${progressStepTotal}: Date & Time`;
+
         content += `
             <div class="modal-header" style="text-align: center; margin-bottom: 20px;">
                 <h2 style="margin-bottom: 5px;">${bookingState.merchant.name}</h2>
-                <p style="color: #666;">Step ${bookingState.step} of 2</p>
+                <p style="color: #666;">${headerStepText}</p>
             </div>
         `;
     }
@@ -890,18 +1622,32 @@ function renderBookingWizard() {
             <button class="btn-primary" onclick="nextBookingStep()" ${bookingState.services.length === 0 ? 'disabled' : ''}>Next </button>
         `;
     }
-    // Step 2: Select Date & Time
+    // Step 2: Select Staff
     else if (bookingState.step === 2) {
-        content += renderBookingStep2();
+        content += renderBookingStepStaff();
+        const canProceed = getBookableStaffOptions(bookingState.merchant).length === 0 || !!bookingState.selectedStaff;
         footer.innerHTML = `
             <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
-            <button class="btn-primary" onclick="nextBookingStep()" ${!bookingState.date || !bookingState.time ? 'disabled' : ''}>Next </button>
+            <button class="btn-primary" onclick="nextBookingStep()" ${!canProceed ? 'disabled' : ''}>Next </button>
         `;
     }
-    // Step 3: Confirm
+    // Step 3: Select Date & Time
     else if (bookingState.step === 3) {
+        content += renderBookingStep2();
+        
+        const needsPolicy = !!bookingState.merchant.cancellationPolicy;
+        const canProceed = bookingState.date && bookingState.time && (!needsPolicy || bookingState.policyAgreed);
+        
+        footer.innerHTML = `
+            <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
+            <button class="btn-primary" onclick="nextBookingStep()" ${!canProceed ? 'disabled' : ''}>Next </button>
+        `;
+    }
+    // Step 4: Confirm
+    else if (bookingState.step === 4) {
         content += renderBookingStep3();
         footer.innerHTML = `
+            <button class="btn-outline" onclick="prevBookingStep()">← Back</button>
             <button class="btn-primary full-width" onclick="submitBooking()" style="background: #C19A6B; border: none; font-size: 1.05rem; padding: 14px; border-radius: 8px; font-weight: 500;">Confirm Booking</button>
         `;
     }
@@ -910,46 +1656,77 @@ function renderBookingWizard() {
 }
 
 
+
 // --- STEP 1: SERVICES ---
 function renderBookingStep1() {
     const merchant = bookingState.merchant;
     const now = new Date();
 
     // Get active offers
-    const merchantOffers = allOffers.filter(o => {
-        if (o.storeId !== merchant.id) return false;
-        const endDate = o.endDate?.toDate ? o.endDate.toDate() : new Date(o.endDate);
-        return endDate > now && o.active;
-    });
+    const merchantOffers = getActiveMerchantOffers(merchant.id, now);
 
-    const servicesList = merchant.services ? merchant.services.map((s, index) => {
+    const servicesList = merchant.services ? merchant.services.map((s) => {
         const isSelected = bookingState.services.some(sel => sel.name === s.name);
+        const basePrice = Number(s.price) || 0;
+        const duration = Number(s.duration) || 0;
+        const serviceOffers = merchantOffers.filter(o => o.serviceName === s.name);
+        const allDayOffers = serviceOffers.filter(o => !isOfferTimeRestricted(o));
+        const timedOffers = serviceOffers.filter(o => isOfferTimeRestricted(o));
 
-        // Calculate Price with Offer
-        const offer = merchantOffers.find(o => o.serviceName === s.name);
-        const hasDiscount = !!offer;
-        const discountPercent = offer?.discountPercent || 0;
-        const currentPrice = hasDiscount ? Math.round(s.price * (1 - discountPercent / 100)) : s.price;
+        const bestAllDayOffer = allDayOffers.reduce((best, current) => {
+            const bestDiscount = Number(best?.discountPercent || 0);
+            const currentDiscount = Number(current?.discountPercent || 0);
+            return currentDiscount > bestDiscount ? current : best;
+        }, null);
+
+        const bestTimedOffer = timedOffers.reduce((best, current) => {
+            const bestDiscount = Number(best?.discountPercent || 0);
+            const currentDiscount = Number(current?.discountPercent || 0);
+            return currentDiscount > bestDiscount ? current : best;
+        }, null);
+
+        const allDayDiscount = Number(bestAllDayOffer?.discountPercent || 0);
+        const hasAllDayDeal = allDayDiscount > 0;
+        const displayPrice = hasAllDayDeal ? Math.round(basePrice * (1 - allDayDiscount / 100)) : basePrice;
+
+        let offerTag = '';
+        let offerHint = '';
+        if (hasAllDayDeal) {
+            offerTag = `<span class="service-discount-tag">${allDayDiscount}% OFF</span>`;
+        } else if (bestTimedOffer) {
+            offerTag = `<span class="service-discount-tag">${Number(bestTimedOffer.discountPercent) || 0}% OFF</span>`;
+            offerHint = `<div class="service-offpeak-hint">Valid ${formatOfferHours(bestTimedOffer)}</div>`;
+        }
+
+        const safeServiceName = (s.name || '').replace(/'/g, "\\'");
+        const priceHtml = hasAllDayDeal
+            ? `<div style="display:flex; flex-direction:column; align-items:flex-end; line-height:1.2;">
+                   <span style="font-size: 0.78rem; color: #9ca3af; text-decoration: line-through;">${basePrice.toLocaleString()} IQD</span>
+                   <span>${displayPrice.toLocaleString()} IQD</span>
+               </div>`
+            : `${displayPrice.toLocaleString()} IQD`;
 
         return `
-        <div class="service-select-item ${isSelected ? 'selected' : ''}" onclick="toggleServiceSelection('${s.name}', ${currentPrice}, ${s.duration})">
+        <div class="service-select-item ${isSelected ? 'selected' : ''}" onclick="toggleServiceSelection('${safeServiceName}', ${basePrice}, ${duration})">
             <div style="display: flex; align-items: center;">
                 <div class="checkbox-circle"></div>
                 <div>
                     <div style="font-weight: 500;">
-                        ${s.name} ${hasDiscount ? `<span class="service-discount-tag">${discountPercent}% OFF</span>` : ''}
+                        ${s.name} ${offerTag}
                     </div>
-                    <div style="font-size: 0.8rem; color: #666;">${s.duration} mins</div>
+                    <div style="font-size: 0.8rem; color: #666;">${duration} mins</div>
+                    ${offerHint}
                 </div>
             </div>
-            <div style="font-weight: 600;">${currentPrice.toLocaleString()} IQD</div>
+            <div style="font-weight: 600;">${priceHtml}</div>
         </div>
         `;
     }).join('') : '<p>No services available.</p>';
 
-    // Calculate Totals
-    const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
-    const totalTime = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
+    const previewPricing = calculateBookingPricing({ includeTimeRestricted: false });
+    const hasTimeRestrictedDeals = bookingState.services.some(service =>
+        merchantOffers.some(offer => offer.serviceName === service.name && isOfferTimeRestricted(offer))
+    );
 
     return `
         <h3 style="margin-bottom: 15px;">Select Services</h3>
@@ -958,15 +1735,17 @@ function renderBookingStep1() {
         </div>
         <div class="booking-total">
             <span>Total (${bookingState.services.length} services):</span>
-            <span>${totalCost.toLocaleString()} IQD</span>
+            <span>${previewPricing.finalTotal.toLocaleString()} IQD</span>
         </div>
+        ${previewPricing.discountTotal > 0 ? `<div style="margin-top: 6px; font-size: 0.8rem; color: #16a34a;">All-day discounts applied: -${previewPricing.discountTotal.toLocaleString()} IQD</div>` : ''}
+        ${hasTimeRestrictedDeals ? `<div style="margin-top: 6px; font-size: 0.8rem; color: #6b7280;">Off-peak deals will be applied automatically when you select eligible time slots.</div>` : ''}
     `;
 }
 
-window.toggleServiceSelection = function (name, price, duration) {
+window.toggleServiceSelection = function (name, basePrice, duration) {
     const index = bookingState.services.findIndex(s => s.name === name);
     if (index === -1) {
-        bookingState.services.push({ name, price, duration });
+        bookingState.services.push({ name, price: basePrice, basePrice, duration });
     } else {
         bookingState.services.splice(index, 1);
     }
@@ -977,10 +1756,7 @@ window.toggleServiceSelection = function (name, price, duration) {
 // Cache booked slots per date to avoid re-fetching
 let bookedSlotsCache = {};
 
-async function fetchBookedSlots(merchantId, dateStr) {
-    const cacheKey = `${merchantId}_${dateStr}`;
-    if (bookedSlotsCache[cacheKey]) return bookedSlotsCache[cacheKey];
-
+async function fetchBookedSlotsFromBookings(merchantId, dateStr, selectedStaff = bookingState.selectedStaff) {
     try {
         const selectedDate = new Date(dateStr);
         const dayStart = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate());
@@ -1013,7 +1789,7 @@ async function fetchBookedSlots(merchantId, dateStr) {
         snapshot.forEach(docSnap => {
             const data = docSnap.data();
             // Only count non-cancelled bookings
-            if (data.status === 'cancelled') return;
+            if (isCancelledBookingStatus(data.status)) return;
 
             const bDate = data.bookingDate?.toDate ? data.bookingDate.toDate() : new Date(data.bookingDate);
             
@@ -1024,18 +1800,69 @@ async function fetchBookedSlots(merchantId, dateStr) {
                 return;
             }
 
+            if (!doesBookingMatchSelectedStaff(data, selectedStaff)) {
+                return;
+            }
+
             const h = bDate.getHours();
             const m = bDate.getMinutes();
             const timeKey = `${h}:${m === 0 ? '00' : String(m).padStart(2, '0')}`;
             bookedTimes.set(timeKey, (bookedTimes.get(timeKey) || 0) + 1);
         });
 
-        bookedSlotsCache[cacheKey] = bookedTimes;
         return bookedTimes;
     } catch (e) {
         console.error("Error fetching booked slots:", e);
         return new Map();
     }
+}
+
+async function fetchBookedSlots(merchantId, dateStr) {
+    const selectedStaff = hasSpecificStaffSelection() ? normalizeStaffMember(bookingState.selectedStaff) : null;
+    const selectedStaffKey = selectedStaff ? String(selectedStaff.id) : 'all';
+    const cacheKey = `${merchantId}_${dateStr}_${selectedStaffKey}`;
+    if (bookedSlotsCache[cacheKey]) return bookedSlotsCache[cacheKey];
+
+    const bookedTimes = new Map();
+    const dateKey = getBookingDateKey(dateStr);
+
+    try {
+        const slotQuery = query(
+            collection(db, "bookingSlotAvailability"),
+            where("storeId", "==", merchantId)
+        );
+        const slotSnapshot = await getDocs(slotQuery);
+
+        slotSnapshot.forEach((slotDoc) => {
+            const slotState = getSlotAvailabilityState(slotDoc);
+            const slotData = slotState.slotData;
+            const slotDateKey = slotData.bookingDateKey || getBookingDateKey(slotData.bookingDate);
+            const slotTime = String(slotData.bookingTime || '').trim();
+            if (!slotTime || slotDateKey !== dateKey || slotState.totalBookings <= 0) return;
+
+            if (selectedStaff) {
+                const normalizedStaffName = String(selectedStaff.name || '').trim().toLowerCase();
+                const isSelectedStaffBooked = slotState.occupiedStaffIds.includes(String(selectedStaff.id))
+                    || slotState.occupiedStaffNames.includes(normalizedStaffName);
+                if (isSelectedStaffBooked) {
+                    bookedTimes.set(slotTime, Math.max(bookedTimes.get(slotTime) || 0, 1));
+                }
+                return;
+            }
+
+            bookedTimes.set(slotTime, Math.max(bookedTimes.get(slotTime) || 0, slotState.totalBookings));
+        });
+    } catch (slotError) {
+        console.warn("Error fetching slot availability, falling back to bookings:", slotError);
+    }
+
+    const bookingFallbackTimes = await fetchBookedSlotsFromBookings(merchantId, dateStr, selectedStaff);
+    bookingFallbackTimes.forEach((count, timeKey) => {
+        bookedTimes.set(timeKey, Math.max(bookedTimes.get(timeKey) || 0, count));
+    });
+
+    bookedSlotsCache[cacheKey] = bookedTimes;
+    return bookedTimes;
 }
 
 function formatTime12h(time) {
@@ -1045,8 +1872,19 @@ function formatTime12h(time) {
     return `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
 }
 
-function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, workerCount) {
+function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, workerCount, offerSummary = null) {
     const display = formatTime12h(time);
+    const hasDiscount = !!offerSummary?.hasDiscount;
+    const dealClass = hasDiscount ? 'deal' : '';
+    const dealBadge = hasDiscount ? `<span class="time-slot-deal-badge">${offerSummary.label}</span>` : '';
+
+    if (offerSummary?.isPastTime) {
+        return `<div class="time-slot booked past" title="This time has already passed">
+            <span style="text-decoration: line-through;">${display}</span>
+            <span style="font-size:0.65rem; display:block; color:#9ca3af;">Passed</span>
+        </div>`;
+    }
+
     if (spotsLeft <= 0) {
         // Fully booked
         return `<div class="time-slot booked" title="All ${workerCount} workers booked">
@@ -1055,13 +1893,17 @@ function renderTimeSlotWithCapacity(time, isSelected, bookedCount, spotsLeft, wo
         </div>`;
     } else if (bookedCount > 0) {
         // Partially booked — still available
-        return `<div class="time-slot partial ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')" title="${spotsLeft} of ${workerCount} workers available">
+        return `<div class="time-slot partial ${dealClass} ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')" title="${spotsLeft} of ${workerCount} workers available">
             <span>${display}</span>
+            ${dealBadge}
             <span style="font-size:0.6rem; display:block; color:#d97706;">${spotsLeft} spot${spotsLeft > 1 ? 's' : ''} left</span>
         </div>`;
     } else {
         // Fully available
-        return `<div class="time-slot ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')">${display}</div>`;
+        return `<div class="time-slot ${dealClass} ${isSelected ? 'selected' : ''}" onclick="selectBookingTime('${time}')">
+            <span>${display}</span>
+            ${dealBadge}
+        </div>`;
     }
 }
 
@@ -1131,53 +1973,84 @@ function renderBookingStep2() {
         } else {
             const startHour = 10;
             const endHour = 20;
+            const selectedDate = new Date(bookingState.date);
+            const now = new Date();
+            const isTodaySelected = selectedDate.toDateString() === now.toDateString();
+            const currentMinutes = (now.getHours() * 60) + now.getMinutes();
             const bookedSlots = bookingState.bookedSlots || new Map();
-            const workerCount = bookingState.merchant.workerCount || 1;
-            const totalSlots = (endHour - startHour) * 2;
+            const workerCount = hasSpecificStaffSelection()
+                ? 1
+                : getEffectiveWorkerCapacity(bookingState.merchant);
+            let openSlotCount = 0;
             let fullyBookedCount = 0;
-            let partialCount = 0;
+            let pastSlotCount = 0;
+            let discountedSlotCount = 0;
+            const slotEntries = [];
 
-            // Count fully booked and partial slots
             for (let h = startHour; h < endHour; h++) {
                 ['00', '30'].forEach(m => {
                     const timeKey = `${h}:${m}`;
                     const count = bookedSlots.get(timeKey) || 0;
-                    if (count >= workerCount) fullyBookedCount++;
-                    else if (count > 0) partialCount++;
+                    const spotsLeft = workerCount - count;
+                    const isSelected = bookingState.time === timeKey;
+                    const offerSummary = getSlotDiscountSummary(timeKey, bookingState.date);
+                    const slotMinutes = parseTimeToMinutes(timeKey);
+                    const isPastTime = isTodaySelected && slotMinutes !== null && slotMinutes <= currentMinutes;
+
+                    if (isPastTime) {
+                        pastSlotCount++;
+                    } else if (count >= workerCount) {
+                        fullyBookedCount++;
+                    } else {
+                        openSlotCount++;
+                        if (offerSummary.hasDiscount) discountedSlotCount++;
+                    }
+
+                    slotEntries.push({
+                        time: timeKey,
+                        count,
+                        spotsLeft,
+                        isSelected,
+                        offerSummary: {
+                            ...offerSummary,
+                            isPastTime
+                        }
+                    });
                 });
             }
-            const availCount = totalSlots - fullyBookedCount;
 
             timesHtml = `
                 <div class="booking-times-header">
                     <h4> ${new Date(bookingState.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</h4>
                     <div class="slots-summary">
-                        <span class="slots-available"> ${availCount} Open</span>
+                        <span class="slots-available"> ${openSlotCount} Open</span>
                         ${fullyBookedCount > 0 ? `<span class="slots-booked"> ${fullyBookedCount} Full</span>` : ''}
+                        ${pastSlotCount > 0 ? `<span class="slots-booked"> ${pastSlotCount} Passed</span>` : ''}
+                        ${discountedSlotCount > 0 ? `<span class="slots-deals"> ${discountedSlotCount} Deal Slots</span>` : ''}
                         ${workerCount > 1 ? `<span style="color:#666;font-size:0.75rem;"> ${workerCount} workers</span>` : ''}
                     </div>
                 </div>
                 <div class="time-slots-grid">
             `;
 
-            for (let h = startHour; h < endHour; h++) {
-                const time1 = `${h}:00`;
-                const isSel1 = bookingState.time === time1;
-                const count1 = bookedSlots.get(time1) || 0;
-                const spotsLeft1 = workerCount - count1;
-                timesHtml += renderTimeSlotWithCapacity(time1, isSel1, count1, spotsLeft1, workerCount);
-
-                const time2 = `${h}:30`;
-                const isSel2 = bookingState.time === time2;
-                const count2 = bookedSlots.get(time2) || 0;
-                const spotsLeft2 = workerCount - count2;
-                timesHtml += renderTimeSlotWithCapacity(time2, isSel2, count2, spotsLeft2, workerCount);
-            }
+            slotEntries.forEach(slot => {
+                timesHtml += renderTimeSlotWithCapacity(
+                    slot.time,
+                    slot.isSelected,
+                    slot.count,
+                    slot.spotsLeft,
+                    workerCount,
+                    slot.offerSummary
+                );
+            });
 
             timesHtml += `</div>`;
         }
     }
 
+    const selectedSlotSummary = bookingState.date && bookingState.time
+        ? getSlotDiscountSummary(bookingState.time, bookingState.date)
+        : { hasDiscount: false };
     const canGoPrev = month > new Date().getMonth() || year > new Date().getFullYear();
 
     return `
@@ -1197,6 +2070,22 @@ function renderBookingStep2() {
                 <p> Select a date on the calendar to see available time slots</p>
             </div>
         `}
+        ${selectedSlotSummary.hasDiscount ? `
+            <div style="margin-top: 10px; padding: 10px 12px; border: 1px solid rgba(193,154,107,0.35); background: rgba(193,154,107,0.08); border-radius: 8px; font-size: 0.82rem; color: #6b4f2c;">
+                Deal applied for this slot: <strong>${selectedSlotSummary.label}</strong>
+            </div>
+        ` : ''}
+        
+        ${bookingState.date && bookingState.time && bookingState.merchant.cancellationPolicy ? `
+            <div class="booking-policy-box" style="margin-top: 20px; padding: 15px; background: #fdf2f8; border-radius: 8px; border: 1px solid #fbcfe8;">
+                <h4 style="margin-bottom: 8px; color: #9d174d; font-size: 0.95rem;">Cancellation & No-Show Policy</h4>
+                <p style="font-size: 0.85rem; color: #831843; margin-bottom: 12px;">${bookingState.merchant.cancellationPolicy}</p>
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem; color: #4b5563;">
+                    <input type="checkbox" id="booking-policy-check" onchange="togglePolicyAgreement(this.checked)" ${bookingState.policyAgreed ? 'checked' : ''} style="width: 16px; height: 16px; accent-color: var(--primary);">
+                    I agree to the cancellation policy
+                </label>
+            </div>
+        ` : ''}
     `;
 }
 
@@ -1208,8 +2097,11 @@ window.changeBookingCalMonth = function (offset) {
 window.selectBookingDate = async function (dateStr) {
     bookingState.date = dateStr;
     bookingState.time = null;
+    bookingState.policyAgreed = false;
     bookingState.bookedSlots = undefined;
     renderBookingWizard();
+    
+    // ... rest of the logic ...
 
     const bookedSlots = await fetchBookedSlots(bookingState.merchant.id, dateStr);
     bookingState.bookedSlots = bookedSlots;
@@ -1218,14 +2110,33 @@ window.selectBookingDate = async function (dateStr) {
 
 window.selectBookingTime = function (timeStr) {
     bookingState.time = timeStr;
+    bookingState.policyAgreed = false;
+    renderBookingWizard();
+}
+
+window.togglePolicyAgreement = function (checked) {
+    bookingState.policyAgreed = checked;
     renderBookingWizard();
 }
 
 // --- STEP 3: CONFIRM ---
 function renderBookingStep3() {
-    const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
-    const totalDuration = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
+    const pricing = calculateBookingPricing({
+        dateStr: bookingState.date,
+        timeStr: bookingState.time,
+        includeTimeRestricted: true
+    });
+    const totalCost = pricing.finalTotal;
+    const totalDuration = pricing.totalDuration;
     const serviceNames = bookingState.services.map(s => s.name).join(', ');
+    const bookableStaff = getBookableStaffOptions(bookingState.merchant);
+    const hasMultipleWorkers = bookableStaff.length > 1;
+    const isAutomaticAssignment = hasMultipleWorkers && !hasSpecificStaffSelection();
+    const selectedStaffLabel = hasSpecificStaffSelection()
+        ? bookingState.selectedStaff.name
+        : bookableStaff.length === 1
+            ? bookableStaff[0].name
+            : 'Any available worker';
 
     // Date formatting (e.g., "Tue, Mar 31")
     let dateStr = bookingState.date;
@@ -1268,6 +2179,12 @@ function renderBookingStep3() {
                 <span style="color: #888; font-size: 0.95rem;">Service</span>
                 <span style="color: #333; font-weight: 500; font-size: 0.95rem; text-align: right; max-width: 60%;">${serviceNames}</span>
             </div>
+            ${(bookableStaff.length > 0 || bookingState.selectedStaff) ? `
+            <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+                <span style="color: #888; font-size: 0.95rem;">${isAutomaticAssignment ? 'Staff Preference' : 'Staff Member'}</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${selectedStaffLabel}</span>
+            </div>
+            ` : ''}
             <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
                 <span style="color: #888; font-size: 0.95rem;">Duration</span>
                 <span style="color: #333; font-weight: 500; font-size: 0.95rem;">${totalDuration} minutes</span>
@@ -1282,12 +2199,29 @@ function renderBookingStep3() {
             </div>
             
             <div style="height: 1px; background: #EBEBEB; margin: 20px 0;"></div>
+
+            ${pricing.discountTotal > 0 ? `
+            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                <span style="color: #888; font-size: 0.92rem;">Subtotal</span>
+                <span style="color: #333; font-weight: 500; font-size: 0.92rem;">${pricing.baseTotal.toLocaleString()} IQD</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                <span style="color: #16a34a; font-size: 0.92rem;">Discount</span>
+                <span style="color: #16a34a; font-weight: 600; font-size: 0.92rem;">-${pricing.discountTotal.toLocaleString()} IQD</span>
+            </div>
+            ` : ''}
             
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0;">
                 <span style="color: #888; font-size: 0.95rem;">Total</span>
                 <span style="color: #C19A6B; font-weight: 700; font-size: 1.2rem;">${totalCost.toLocaleString()} IQD</span>
             </div>
         </div>
+
+        ${isAutomaticAssignment ? `
+        <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; font-size: 0.84rem; color: #1d4ed8; line-height: 1.5;">
+            A worker will be assigned automatically from the available team when you confirm this booking.
+        </div>
+        ` : ''}
 
         <div style="background: #FFF8E1; border: 1px solid #FFE082; border-radius: 10px; padding: 14px 16px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#F9A825" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="min-width: 20px; margin-top: 1px;">
@@ -1304,14 +2238,229 @@ function renderBookingStep3() {
 }
 
 // Navigation
+// --- STEP 2: STAFF SELECTION ---
+window.selectStaff = function(staffId, staffName) {
+    bookingState.selectedStaff = staffId === 'anyone'
+        ? getAutomaticStaffChoice()
+        : normalizeStaffMember({ id: staffId, name: staffName });
+    bookingState.time = null;
+
+    if (bookingState.date) {
+        refreshBookedSlotsForCurrentSelection();
+        return;
+    }
+
+    renderBookingWizard();
+}
+
+function renderBookingStepStaff() {
+    const staff = getBookableStaffOptions(bookingState.merchant);
+
+    if (staff.length === 0) {
+        return `
+            <div class="staff-selection-container" style="padding: 18px; border: 1px solid var(--border); border-radius: 14px; background: #fff;">
+                <h3 style="margin: 0 0 8px;">Worker assignment</h3>
+                <p style="margin: 0; color: #6b7280; line-height: 1.5;">This venue has not set up named workers yet. Your booking will be assigned to the available team member automatically.</p>
+            </div>
+        `;
+    }
+
+    let staffHTML = `
+        <div class="staff-selection-container" style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px; max-height: 400px; overflow-y: auto;">
+            <div style="padding: 6px 2px 10px; color: #6b7280; font-size: 0.9rem;">${staff.length > 1 ? 'Choose a worker or let Hewrina assign the available one automatically.' : 'Choose the worker for this appointment.'}</div>
+    `;
+
+    if (staff.length > 1) {
+        const isAutomaticSelection = !hasSpecificStaffSelection();
+        staffHTML += `
+            <div class="staff-card ${isAutomaticSelection ? 'selected' : ''}" 
+                 onclick="selectStaff('anyone', 'Any available worker')"
+                 style="display: flex; align-items: center; padding: 15px; border: 1px solid ${isAutomaticSelection ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; cursor: pointer; transition: all 0.2s; background: ${isAutomaticSelection ? '#fdfdfb' : '#fff'};">
+                <div style="width: 50px; height: 50px; border-radius: 50%; background: #ede9fe; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #5b21b6; margin-right: 15px; font-size: 1rem;">Any</div>
+                <div>
+                    <h4 style="margin: 0; font-size: 1.05rem;">No preference</h4>
+                    <p style="margin: 4px 0 0; font-size: 0.85rem; color: #666;">We will assign one of the available workers for this time.</p>
+                </div>
+            </div>
+        `;
+    }
+
+    staff.forEach((st) => {
+        const isSelected = bookingState.selectedStaff?.id === st.id;
+        const defaultIcon = `<div style="width: 50px; height: 50px; border-radius: 50%; background: #e2e8f0; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #64748b; margin-right: 15px; font-size: 1.2rem;">${st.name.charAt(0)}</div>`;
+        const imgIcon = `<img src="${st.image}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover; margin-right: 15px;">`;
+
+        staffHTML += `
+            <div class="staff-card ${isSelected ? 'selected' : ''}" 
+                 onclick="selectStaff('${String(st.id).replace(/'/g, "\\'")}', '${st.name.replace(/'/g, "\\'")}')"
+                 style="display: flex; align-items: center; padding: 15px; border: 1px solid ${isSelected ? 'var(--primary)' : 'var(--border)'}; border-radius: 12px; cursor: pointer; transition: all 0.2s; background: ${isSelected ? '#fdfdfb' : '#fff'};">
+                ${st.image ? imgIcon : defaultIcon}
+                <div>
+                    <h4 style="margin: 0; font-size: 1.1rem;">${st.name}</h4>
+                    <p style="margin: 4px 0 0; font-size: 0.85rem; color: #666;">${st.role || 'Staff'}</p>
+                </div>
+            </div>
+        `;
+    });
+
+    staffHTML += `</div>`;
+    return staffHTML;
+}
+
+// Navigation
 window.nextBookingStep = function () {
     bookingState.step++;
+    if (bookingState.step === 2) {
+        const bookableStaff = getBookableStaffOptions(bookingState.merchant);
+        if (bookableStaff.length <= 1) {
+            const onlyStaff = normalizeStaffMember(bookableStaff[0]);
+            bookingState.selectedStaff = onlyStaff;
+            bookingState.step++; 
+        } else if (!bookingState.selectedStaff) {
+            bookingState.selectedStaff = getAutomaticStaffChoice();
+        }
+    }
     renderBookingWizard();
+
+    if (bookingState.step === 3 && bookingState.date && bookingState.bookedSlots === undefined) {
+        refreshBookedSlotsForCurrentSelection();
+    }
 }
 
 window.prevBookingStep = function () {
     bookingState.step--;
+    if (bookingState.step === 2) {
+        if (getBookableStaffOptions(bookingState.merchant).length <= 1) {
+            bookingState.step--; 
+        }
+    }
     renderBookingWizard();
+}
+
+async function createBookingTransaction({
+    bookingDateObj,
+    bookingServices,
+    pricing,
+    totalCost,
+    totalDuration,
+    commission,
+    autoAssignSeed
+}) {
+    const merchantRef = doc(db, "merchants", bookingState.merchant.id);
+    const bookingRef = doc(collection(db, 'bookings'));
+    const requestedTimeKey = bookingState.time;
+    const requestedStaff = normalizeStaffMember(bookingState.selectedStaff);
+    const requestedUiCount = Math.max(0, Number(bookingState.bookedSlots?.get?.(requestedTimeKey)) || 0);
+
+    return runTransaction(db, async (transaction) => {
+        const merchantSnap = await transaction.get(merchantRef);
+        if (!merchantSnap.exists()) {
+            throw new Error('Store not found.');
+        }
+
+        const latestMerchant = { id: merchantSnap.id, ...merchantSnap.data() };
+        const staffOptions = getBookableStaffOptions(latestMerchant)
+            .map(staff => normalizeStaffMember(staff))
+            .filter(Boolean);
+        const slotRef = getBookingSlotRef(latestMerchant.id, bookingDateObj, requestedTimeKey);
+        const slotSnap = await transaction.get(slotRef);
+        const slotState = getSlotAvailabilityState(slotSnap);
+        const bookingsAtRequestedTime = Math.max(slotState.totalBookings, requestedUiCount);
+        const occupiedStaffIds = new Set(slotState.occupiedStaffIds);
+        const occupiedStaffNames = new Set(slotState.occupiedStaffNames);
+
+        let assignedStaff = null;
+        let assignmentMode = 'unassigned';
+
+        if (staffOptions.length <= 1) {
+            if (bookingsAtRequestedTime >= 1) {
+                throw new Error('This time slot just filled up. Please choose another time.');
+            }
+            assignedStaff = staffOptions[0] || null;
+            assignmentMode = assignedStaff ? 'single-worker' : 'unassigned';
+        } else {
+            const requestedSpecificStaff = requestedStaff && requestedStaff.id !== 'anyone'
+                ? resolveRequestedStaffMember(staffOptions, requestedStaff)
+                : null;
+
+            if (requestedStaff && requestedStaff.id !== 'anyone' && !requestedSpecificStaff) {
+                throw new Error('Selected worker is no longer available. Please choose another worker.');
+            }
+
+            if (requestedSpecificStaff) {
+                const isOccupied = occupiedStaffIds.has(String(requestedSpecificStaff.id))
+                    || occupiedStaffNames.has(String(requestedSpecificStaff.name || '').trim().toLowerCase());
+                if (isOccupied) {
+                    throw new Error(`${requestedSpecificStaff.name} is no longer available at this time.`);
+                }
+                assignedStaff = requestedSpecificStaff;
+                assignmentMode = 'selected';
+            } else {
+                if (bookingsAtRequestedTime >= staffOptions.length) {
+                    throw new Error('This time slot just filled up. Please choose another time.');
+                }
+
+                const availableStaff = staffOptions.filter((staff) => {
+                    const normalizedName = String(staff.name || '').trim().toLowerCase();
+                    return !occupiedStaffIds.has(String(staff.id)) && !occupiedStaffNames.has(normalizedName);
+                });
+                const assignmentPool = availableStaff.length > 0 ? availableStaff : staffOptions;
+                assignedStaff = pickAutomaticallyAssignedStaff(assignmentPool, autoAssignSeed);
+                assignmentMode = 'automatic';
+            }
+        }
+
+        const bookingData = {
+            userId: currentUser.id || currentUser.phone,
+            customerName: currentUser.name,
+            customerPhone: currentUser.phone,
+            storeId: latestMerchant.id,
+            merchantId: latestMerchant.id,
+            storeName: latestMerchant.name,
+
+            services: bookingServices,
+            staffMember: assignedStaff || null,
+            staffAssignmentMode: assignmentMode,
+
+            serviceName: bookingState.services.map(s => s.name).join(', '),
+            servicePrice: totalCost,
+            price: totalCost,
+            serviceDuration: totalDuration,
+            basePriceTotal: pricing.baseTotal,
+            discountTotal: pricing.discountTotal,
+            appliedOffers: pricing.appliedOffers,
+
+            bookingDate: bookingDateObj,
+            bookingTime: requestedTimeKey,
+            status: 'pending',
+            commission: commission,
+            createdAt: new Date().toISOString()
+        };
+
+        transaction.set(bookingRef, bookingData);
+        transaction.set(slotRef, {
+            storeId: latestMerchant.id,
+            storeName: latestMerchant.name || '',
+            bookingDateKey: getBookingDateKey(bookingDateObj),
+            bookingDate: bookingDateObj,
+            bookingTime: requestedTimeKey,
+            totalBookings: bookingsAtRequestedTime + 1,
+            occupiedStaffIds: assignedStaff?.id
+                ? Array.from(new Set([...slotState.occupiedStaffIds, String(assignedStaff.id)]))
+                : slotState.occupiedStaffIds,
+            occupiedStaffNames: assignedStaff?.name
+                ? Array.from(new Set([...slotState.occupiedStaffNames, assignedStaff.name.toLowerCase()]))
+                : slotState.occupiedStaffNames,
+            bookingIds: Array.from(new Set([...slotState.bookingIds, bookingRef.id])),
+            updatedAt: new Date().toISOString()
+        }, { merge: true });
+
+        return {
+            bookingId: bookingRef.id,
+            assignedStaff,
+            assignmentMode
+        };
+    });
 }
 
 // Submit
@@ -1323,19 +2472,18 @@ window.submitBooking = async function () {
         return;
     }
 
-    const totalCost = bookingState.services.reduce((sum, s) => sum + s.price, 0);
-    const totalDuration = bookingState.services.reduce((sum, s) => sum + s.duration, 0);
-
-    // Create Date Object - parse properly to avoid browser inconsistencies
-    const selectedDate = new Date(bookingState.date);
-    const [hours, minutes] = bookingState.time.split(':').map(Number);
-    const bookingDateObj = new Date(
-        selectedDate.getFullYear(),
-        selectedDate.getMonth(),
-        selectedDate.getDate(),
-        hours,
-        minutes
-    );
+    const pricing = calculateBookingPricing({
+        dateStr: bookingState.date,
+        timeStr: bookingState.time,
+        includeTimeRestricted: true
+    });
+    const totalCost = pricing.finalTotal;
+    const totalDuration = pricing.totalDuration;
+    const bookingDateObj = getBookingDateTime(bookingState.date, bookingState.time);
+    if (!bookingDateObj) {
+        showToast("Invalid date/time selected.", 'error');
+        return;
+    }
 
     // Validate booking date is not in the past
     if (bookingDateObj < new Date()) {
@@ -1343,39 +2491,37 @@ window.submitBooking = async function () {
         return;
     }
 
-    // Recalculate commission from verified service prices (10%)
+    // Recalculate commission from final discounted total (10%)
     const commission = Math.round(totalCost * 0.1);
+    const bookingServices = bookingState.services.map(service => ({
+        name: service.name,
+        price: getServiceBasePrice(service),
+        duration: Number(service.duration) || 0
+    }));
+    const autoAssignSeed = bookingState.autoAssignSeed ?? Date.now();
+    bookingState.autoAssignSeed = autoAssignSeed;
 
     try {
-        const bookingData = {
-            userId: currentUser.id || currentUser.phone,
-            customerName: currentUser.name,
-            customerPhone: currentUser.phone,
-            storeId: bookingState.merchant.id,
-            merchantId: bookingState.merchant.id,
-            storeName: bookingState.merchant.name,
-
-            services: bookingState.services,
-
-            serviceName: bookingState.services.map(s => s.name).join(', '),
-            servicePrice: totalCost,
-            price: totalCost,
-            serviceDuration: totalDuration,
-
-            bookingDate: bookingDateObj,
-            bookingTime: bookingState.time,
-            status: 'pending',
-            commission: commission,
-            createdAt: new Date().toISOString()
-        };
-
-        await addDoc(collection(db, 'bookings'), bookingData);
+        const transactionResult = await createBookingTransaction({
+            bookingDateObj,
+            bookingServices,
+            pricing,
+            totalCost,
+            totalDuration,
+            commission,
+            autoAssignSeed
+        });
 
         // Invalidate booked slots cache so the slot shows as taken
         bookedSlotsCache = {};
 
-        showToast('Booking Request Sent! ', 'success');
+        const assignedStaffName = transactionResult?.assignedStaff?.name;
+        const successMessage = assignedStaffName
+            ? `Booking Request Sent! Assigned to ${assignedStaffName}.`
+            : 'Booking Request Sent!';
+        showToast(successMessage, 'success');
         document.getElementById('booking-modal').style.display = 'none';
+        resetBookingState();
 
         // Refresh if needed
         if (currentUser.role === 'admin') loadFinancials();
@@ -1388,29 +2534,571 @@ window.submitBooking = async function () {
 
 // ========== ADMIN FUNCTIONS ==========
 
+let currentAdminAnalyticsRange = '90d';
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function formatCompactNumber(value) {
+    return new Intl.NumberFormat('en-US', {
+        notation: 'compact',
+        maximumFractionDigits: value >= 1000 ? 1 : 0
+    }).format(Math.max(0, Number(value) || 0));
+}
+
+function formatIQDCompact(value) {
+    return `${formatCompactNumber(value)} IQD`;
+}
+
+function formatPercentValue(value, maximumFractionDigits = 0) {
+    return `${new Intl.NumberFormat('en-US', {
+        maximumFractionDigits
+    }).format(Math.max(0, Number(value) || 0))}%`;
+}
+
+function getAnalyticsRangeStart(rangeKey, now = new Date()) {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+
+    if (rangeKey === '30d') {
+        start.setDate(start.getDate() - 29);
+        return start;
+    }
+
+    if (rangeKey === '90d') {
+        start.setDate(start.getDate() - 89);
+        return start;
+    }
+
+    return null;
+}
+
+function getAnalyticsRangeLabel(rangeKey) {
+    if (rangeKey === '30d') return 'last 30 days';
+    if (rangeKey === '90d') return 'last 90 days';
+    return 'all time';
+}
+
+function isDateWithinAnalyticsRange(dateValue, rangeStart, rangeEnd = new Date()) {
+    const date = toSafeDate(dateValue);
+    if (!date) return false;
+    if (date > rangeEnd) return false;
+    return !rangeStart || date >= rangeStart;
+}
+
+function getBookingPrimaryDate(booking) {
+    return getBookingDateValue(booking) || toSafeDate(booking?.createdAt);
+}
+
+function getBookingRevenueValue(booking) {
+    return Math.max(0, Number(booking?.servicePrice ?? booking?.price ?? 0) || 0);
+}
+
+function getOrderRevenueValue(order) {
+    return Math.max(0, Number(order?.subtotal ?? order?.total ?? 0) || 0);
+}
+
+function splitBookingServiceNames(booking) {
+    const services = Array.isArray(booking?.services) && booking.services.length > 0
+        ? booking.services.map(service => service?.name)
+        : String(booking?.serviceName || '').split(',');
+
+    return services
+        .map(serviceName => String(serviceName || '').trim())
+        .filter(Boolean);
+}
+
+function buildStoreRatingMap(reviews) {
+    const ratingMap = new Map();
+    (Array.isArray(reviews) ? reviews : []).forEach((review) => {
+        const storeId = review?.storeId;
+        if (!storeId) return;
+
+        if (!ratingMap.has(storeId)) {
+            ratingMap.set(storeId, { count: 0, total: 0 });
+        }
+
+        const rating = ratingMap.get(storeId);
+        rating.count += 1;
+        rating.total += Math.max(0, Number(review?.rating) || 0);
+    });
+
+    ratingMap.forEach((rating) => {
+        rating.avg = rating.count > 0 ? rating.total / rating.count : 0;
+    });
+
+    return ratingMap;
+}
+
+function createAnalyticsBuckets(rangeKey, now = new Date()) {
+    const buckets = [];
+
+    if (rangeKey === 'all') {
+        for (let offset = 5; offset >= 0; offset--) {
+            const bucketStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+            const bucketEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
+            buckets.push({
+                label: bucketStart.toLocaleDateString('en-US', { month: 'short' }),
+                start: bucketStart,
+                end: bucketEnd,
+                bookings: 0,
+                revenue: 0
+            });
+        }
+        return buckets;
+    }
+
+    const bucketDays = rangeKey === '30d' ? 5 : 15;
+    const bucketCount = 6;
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const seriesStart = new Date(today);
+    seriesStart.setDate(seriesStart.getDate() - ((bucketCount * bucketDays) - 1));
+
+    for (let index = 0; index < bucketCount; index++) {
+        const bucketStart = new Date(seriesStart);
+        bucketStart.setDate(seriesStart.getDate() + (index * bucketDays));
+
+        const bucketEnd = new Date(bucketStart);
+        bucketEnd.setDate(bucketStart.getDate() + bucketDays);
+
+        buckets.push({
+            label: bucketStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            start: bucketStart,
+            end: bucketEnd,
+            bookings: 0,
+            revenue: 0
+        });
+    }
+
+    return buckets;
+}
+
+function addValueToAnalyticsBuckets(buckets, dateValue, fieldName, amount) {
+    const safeAmount = Math.max(0, Number(amount) || 0);
+    const date = toSafeDate(dateValue);
+    if (!date || !Array.isArray(buckets)) return;
+
+    const bucket = buckets.find(entry => date >= entry.start && date < entry.end);
+    if (!bucket) return;
+    bucket[fieldName] += safeAmount;
+}
+
+function renderAnalyticsMiniList(containerId, items) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        container.innerHTML = '<div class="analytics-empty">No data available yet.</div>';
+        return;
+    }
+
+    container.innerHTML = items.map(item => `
+        <div class="analytics-mini-item">
+            <span class="analytics-mini-label">${escapeHtml(item.label)}</span>
+            <span class="analytics-mini-value">${escapeHtml(item.value)}</span>
+        </div>
+    `).join('');
+}
+
+function renderAnalyticsRankingList(containerId, items, emptyMessage) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        container.innerHTML = `<div class="analytics-empty">${escapeHtml(emptyMessage || 'No data available yet.')}</div>`;
+        return;
+    }
+
+    const maxValue = Math.max(...items.map(item => Math.max(0, Number(item.value) || 0)), 1);
+
+    container.innerHTML = items.map(item => {
+        const width = Math.max(6, Math.round(((Math.max(0, Number(item.value) || 0)) / maxValue) * 100));
+        return `
+            <div class="analytics-ranking-item">
+                <div class="analytics-ranking-copy">
+                    <div class="analytics-ranking-title">${escapeHtml(item.title)}</div>
+                    <div class="analytics-ranking-meta">${escapeHtml(item.meta || '')}</div>
+                    <div class="analytics-progress">
+                        <div class="analytics-progress-bar" style="width:${width}%"></div>
+                    </div>
+                </div>
+                <div class="analytics-ranking-value">${escapeHtml(item.valueLabel ?? String(item.value))}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderAnalyticsBars(containerId, buckets, metricKey, fillClass = '') {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!Array.isArray(buckets) || buckets.length === 0) {
+        container.innerHTML = '<div class="analytics-empty">No trend data available yet.</div>';
+        return;
+    }
+
+    const maxValue = Math.max(...buckets.map(bucket => Math.max(0, Number(bucket?.[metricKey]) || 0)), 1);
+
+    container.innerHTML = buckets.map(bucket => {
+        const value = Math.max(0, Number(bucket?.[metricKey]) || 0);
+        const height = Math.max(8, Math.round((value / maxValue) * 100));
+        const valueLabel = metricKey === 'revenue'
+            ? formatIQDCompact(value)
+            : formatCompactNumber(value);
+
+        return `
+            <div class="analytics-bar-col">
+                <div class="analytics-bar-value">${escapeHtml(valueLabel)}</div>
+                <div class="analytics-bar-track">
+                    <div class="analytics-bar-fill ${fillClass}" style="height:${height}%"></div>
+                </div>
+                <div class="analytics-bar-label">${escapeHtml(bucket.label)}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function setAnalyticsLoadingState() {
+    const loadingMessage = 'Loading analytics...';
+    const headline = document.getElementById('analytics-headline');
+    const subheadline = document.getElementById('analytics-subheadline');
+    const topStores = document.getElementById('analytics-top-stores-tbody');
+
+    if (headline) headline.textContent = loadingMessage;
+    if (subheadline) subheadline.textContent = 'Gathering venue, booking, and sponsor data.';
+    if (topStores) topStores.innerHTML = '<tr><td colspan="6">Loading top venues...</td></tr>';
+
+    renderAnalyticsMiniList('analytics-audience-list', []);
+    renderAnalyticsMiniList('analytics-commercial-list', []);
+    renderAnalyticsMiniList('analytics-sponsor-list', []);
+    renderAnalyticsRankingList('analytics-category-breakdown', [], loadingMessage);
+    renderAnalyticsRankingList('analytics-service-breakdown', [], loadingMessage);
+
+    const bookingsChart = document.getElementById('analytics-bookings-chart');
+    const revenueChart = document.getElementById('analytics-revenue-chart');
+    if (bookingsChart) bookingsChart.innerHTML = '<div class="analytics-empty">Loading booking trend...</div>';
+    if (revenueChart) revenueChart.innerHTML = '<div class="analytics-empty">Loading revenue trend...</div>';
+}
+
+function updateAnalyticsRangeButtons() {
+    document.querySelectorAll('.analytics-filter-btn').forEach((button) => {
+        button.classList.toggle('active', button.dataset.range === currentAdminAnalyticsRange);
+    });
+}
+
+function loadAdminTabData(tabName) {
+    if (tabName === 'analytics') loadAdminAnalytics();
+    if (tabName === 'stores') loadAdminStores();
+    if (tabName === 'offers') loadAdminOffers();
+    if (tabName === 'sponsors') loadAdminSponsors();
+    if (tabName === 'orders') loadAdminOrders('all');
+    if (tabName === 'financials') loadFinancials();
+    if (tabName === 'users') loadAdminUsers();
+}
+
+function activateAdminTab(tabName) {
+    const adminTabs = document.querySelectorAll('.admin-tab');
+    adminTabs.forEach((tab) => {
+        tab.classList.toggle('active', tab.dataset.tab === tabName);
+    });
+
+    document.querySelectorAll('.admin-panel').forEach((panel) => {
+        panel.style.display = panel.id === `admin-${tabName}` ? 'block' : 'none';
+    });
+
+    loadAdminTabData(tabName);
+}
+
+window.setAdminAnalyticsRange = function (rangeKey) {
+    currentAdminAnalyticsRange = ['30d', '90d', 'all'].includes(rangeKey) ? rangeKey : '90d';
+    updateAnalyticsRangeButtons();
+    loadAdminAnalytics();
+};
+
+window.loadAdminAnalytics = async function () {
+    setAnalyticsLoadingState();
+    updateAnalyticsRangeButtons();
+
+    try {
+        const [
+            merchantSnapshot,
+            userSnapshot,
+            bookingSnapshot,
+            orderSnapshot,
+            sponsorSnapshot,
+            offerSnapshot,
+            reviewSnapshot
+        ] = await Promise.all([
+            getDocs(collection(db, "merchants")),
+            getDocs(collection(db, "users")),
+            getDocs(collection(db, "bookings")),
+            getDocs(collection(db, "orders")),
+            getDocs(collection(db, "sponsors")),
+            getDocs(collection(db, "offers")),
+            getDocs(collection(db, "reviews"))
+        ]);
+
+        const merchants = merchantSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const users = userSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const bookings = bookingSnapshot.docs.map(docSnap => ({
+            id: docSnap.id,
+            ...docSnap.data(),
+            bookingDate: getBookingDateValue(docSnap.data()) || toSafeDate(docSnap.data().bookingDate) || null
+        }));
+        const orders = orderSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const sponsors = sponsorSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const offers = offerSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+        const reviews = reviewSnapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+
+        allMerchants = merchants;
+        allUsers = users;
+        allBookings = bookings;
+        allSponsors = sponsors;
+        allOffers = offers;
+        allReviews = reviews;
+
+        const now = new Date();
+        const rangeStart = getAnalyticsRangeStart(currentAdminAnalyticsRange, now);
+        const activeMerchants = merchants.filter(merchant => !merchant.suspended);
+        const customerUsers = users.filter(user => user.role === 'customer');
+        const ownerUsers = users.filter(user => user.role === 'owner');
+        const activeSponsors = sponsors.filter(sponsor => {
+            const sponsorStart = toSafeDate(sponsor.startDate);
+            const sponsorEnd = toSafeDate(sponsor.endDate);
+            return sponsor.active
+                && (!sponsorStart || sponsorStart <= now)
+                && (!sponsorEnd || sponsorEnd >= now);
+        });
+        const activeOffers = offers.filter(offer => isOfferActiveAt(offer, now));
+        const sponsoredStoreIds = new Set(activeSponsors.filter(sponsor => sponsor.type === 'store').map(sponsor => sponsor.storeId));
+        const merchantMap = new Map(merchants.map(merchant => [merchant.id, merchant]));
+        const storeRatingMap = buildStoreRatingMap(reviews);
+
+        const rangedBookings = bookings.filter(booking => isDateWithinAnalyticsRange(getBookingPrimaryDate(booking), rangeStart));
+        const rangedOrders = orders.filter(order => isDateWithinAnalyticsRange(order.createdAt, rangeStart));
+        const completedBookings = rangedBookings.filter(booking => getNormalizedBookingStatus(booking.status) === 'completed');
+        const nonCancelledBookings = rangedBookings.filter(booking => !isCancelledBookingStatus(booking.status));
+        const rangedReviews = reviews.filter(review => isDateWithinAnalyticsRange(review.createdAt, rangeStart));
+
+        const totalRevenue = completedBookings.reduce((sum, booking) => sum + getBookingRevenueValue(booking), 0);
+        const totalOrderRevenue = rangedOrders.reduce((sum, order) => sum + getOrderRevenueValue(order), 0);
+        const bookedCustomerCounts = new Map();
+        completedBookings.forEach((booking) => {
+            const key = booking.userId || booking.customerPhone || booking.customerName || booking.id;
+            bookedCustomerCounts.set(key, (bookedCustomerCounts.get(key) || 0) + 1);
+        });
+
+        const bookedCustomerCount = bookedCustomerCounts.size;
+        const repeatCustomerCount = Array.from(bookedCustomerCounts.values()).filter(count => count > 1).length;
+        const repeatCustomerRate = bookedCustomerCount > 0 ? (repeatCustomerCount / bookedCustomerCount) * 100 : 0;
+        const avgBookingValue = completedBookings.length > 0 ? totalRevenue / completedBookings.length : 0;
+        const avgOrderValue = rangedOrders.length > 0 ? totalOrderRevenue / rangedOrders.length : 0;
+        const totalServices = activeMerchants.reduce((sum, merchant) => sum + ((merchant.services || []).length), 0);
+        const geoReadyVenues = activeMerchants.filter(merchant => merchant.lat && merchant.lng).length;
+        const avgTeamSize = activeMerchants.length > 0
+            ? activeMerchants.reduce((sum, merchant) => sum + getEffectiveWorkerCapacity(merchant), 0) / activeMerchants.length
+            : 0;
+        const reviewAverage = reviews.length > 0
+            ? reviews.reduce((sum, review) => sum + (Number(review.rating) || 0), 0) / reviews.length
+            : 0;
+
+        const categoryStats = new Map();
+        completedBookings.forEach((booking) => {
+            const merchant = merchantMap.get(booking.storeId || booking.merchantId);
+            const categoryName = merchant?.category || 'Uncategorized';
+            if (!categoryStats.has(categoryName)) {
+                categoryStats.set(categoryName, {
+                    title: categoryName,
+                    value: 0,
+                    venueIds: new Set(),
+                    revenue: 0
+                });
+            }
+
+            const category = categoryStats.get(categoryName);
+            category.value += 1;
+            category.revenue += getBookingRevenueValue(booking);
+            if (merchant?.id) category.venueIds.add(merchant.id);
+        });
+
+        const serviceStats = new Map();
+        completedBookings.forEach((booking) => {
+            splitBookingServiceNames(booking).forEach((serviceName) => {
+                if (!serviceStats.has(serviceName)) {
+                    serviceStats.set(serviceName, { title: serviceName, value: 0, revenue: 0 });
+                }
+                const service = serviceStats.get(serviceName);
+                service.value += 1;
+                service.revenue += getBookingRevenueValue(booking);
+            });
+        });
+
+        const storePerformance = new Map();
+        activeMerchants.forEach((merchant) => {
+            const rating = storeRatingMap.get(merchant.id) || { avg: 0, count: 0 };
+            storePerformance.set(merchant.id, {
+                merchant,
+                bookings: 0,
+                revenue: 0,
+                ratingAvg: rating.avg,
+                ratingCount: rating.count,
+                sponsored: sponsoredStoreIds.has(merchant.id)
+            });
+        });
+
+        completedBookings.forEach((booking) => {
+            const merchantId = booking.storeId || booking.merchantId;
+            if (!merchantId || !storePerformance.has(merchantId)) return;
+            const performance = storePerformance.get(merchantId);
+            performance.bookings += 1;
+            performance.revenue += getBookingRevenueValue(booking);
+        });
+
+        const topStores = Array.from(storePerformance.values())
+            .sort((a, b) => {
+                if (b.bookings !== a.bookings) return b.bookings - a.bookings;
+                if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+                return b.ratingAvg - a.ratingAvg;
+            })
+            .slice(0, 8);
+
+        const bookingsTrend = createAnalyticsBuckets(currentAdminAnalyticsRange, now);
+        const revenueTrend = createAnalyticsBuckets(currentAdminAnalyticsRange, now);
+
+        nonCancelledBookings.forEach((booking) => {
+            addValueToAnalyticsBuckets(bookingsTrend, getBookingPrimaryDate(booking), 'bookings', 1);
+        });
+
+        completedBookings.forEach((booking) => {
+            addValueToAnalyticsBuckets(revenueTrend, getBookingPrimaryDate(booking), 'revenue', getBookingRevenueValue(booking));
+        });
+
+        const categoryItems = Array.from(categoryStats.values())
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 5)
+            .map((item) => ({
+                title: item.title,
+                meta: `${item.venueIds.size} venue${item.venueIds.size === 1 ? '' : 's'} • ${formatIQDCompact(item.revenue)}`,
+                value: item.value,
+                valueLabel: `${formatCompactNumber(item.value)} bookings`
+            }));
+
+        const serviceItems = Array.from(serviceStats.values())
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 5)
+            .map((item) => ({
+                title: item.title,
+                meta: `${formatIQDCompact(item.revenue)} generated`,
+                value: item.value,
+                valueLabel: `${formatCompactNumber(item.value)} bookings`
+            }));
+
+        const headline = document.getElementById('analytics-headline');
+        const subheadline = document.getElementById('analytics-subheadline');
+        if (headline) {
+            headline.textContent = `${formatCompactNumber(completedBookings.length)} completed bookings across ${activeMerchants.length} active venues`;
+        }
+        if (subheadline) {
+            subheadline.textContent = `${formatCompactNumber(bookedCustomerCount)} customers booked in the ${getAnalyticsRangeLabel(currentAdminAnalyticsRange)}, generating ${formatIQDCompact(totalRevenue)} in booking value while ${activeSponsors.length} sponsorship placements are currently active.`;
+        }
+
+        const statVenue = document.getElementById('analytics-stat-venues');
+        const statCustomers = document.getElementById('analytics-stat-customers');
+        const statBookings = document.getElementById('analytics-stat-bookings');
+        const statRevenue = document.getElementById('analytics-stat-revenue');
+        const statRating = document.getElementById('analytics-stat-rating');
+        const statRatingMeta = document.getElementById('analytics-stat-rating-meta');
+        const statRepeat = document.getElementById('analytics-stat-repeat');
+
+        if (statVenue) statVenue.textContent = formatCompactNumber(activeMerchants.length);
+        if (statCustomers) statCustomers.textContent = formatCompactNumber(customerUsers.length);
+        if (statBookings) statBookings.textContent = formatCompactNumber(completedBookings.length);
+        if (statRevenue) statRevenue.textContent = formatIQDCompact(totalRevenue);
+        if (statRating) statRating.textContent = reviewAverage ? reviewAverage.toFixed(1) : '0.0';
+        if (statRatingMeta) statRatingMeta.textContent = `${formatCompactNumber(reviews.length)} total reviews${rangedReviews.length && currentAdminAnalyticsRange !== 'all' ? ` • ${formatCompactNumber(rangedReviews.length)} in range` : ''}`;
+        if (statRepeat) statRepeat.textContent = formatPercentValue(repeatCustomerRate, 0);
+
+        renderAnalyticsMiniList('analytics-audience-list', [
+            { label: 'Registered customers', value: formatCompactNumber(customerUsers.length) },
+            { label: 'Customers with bookings in range', value: formatCompactNumber(bookedCustomerCount) },
+            { label: 'Repeat customers', value: `${formatCompactNumber(repeatCustomerCount)} (${formatPercentValue(repeatCustomerRate)})` },
+            { label: 'Owner accounts', value: formatCompactNumber(ownerUsers.length) },
+            { label: 'Average team size', value: `${avgTeamSize ? avgTeamSize.toFixed(1) : '0.0'} workers/store` }
+        ]);
+
+        renderAnalyticsMiniList('analytics-commercial-list', [
+            { label: 'Gross booking value', value: formatIQDCompact(totalRevenue) },
+            { label: 'Average booking value', value: formatIQDCompact(avgBookingValue) },
+            { label: 'Shop order GMV', value: formatIQDCompact(totalOrderRevenue) },
+            { label: 'Average order value', value: formatIQDCompact(avgOrderValue) },
+            { label: 'Live offers', value: formatCompactNumber(activeOffers.length) },
+            { label: 'Bookable services', value: formatCompactNumber(totalServices) }
+        ]);
+
+        renderAnalyticsMiniList('analytics-sponsor-list', [
+            { label: 'Active sponsorship placements', value: formatCompactNumber(activeSponsors.length) },
+            { label: 'Sponsored stores live now', value: formatCompactNumber(sponsoredStoreIds.size) },
+            { label: 'External ad placements live now', value: formatCompactNumber(activeSponsors.filter(sponsor => sponsor.type === 'external').length) },
+            { label: 'Geo-ready venues', value: formatCompactNumber(geoReadyVenues) },
+            { label: 'Open premium inventory', value: formatCompactNumber(Math.max(0, activeMerchants.length - sponsoredStoreIds.size)) }
+        ]);
+
+        const bookingCaption = document.getElementById('analytics-bookings-caption');
+        const revenueCaption = document.getElementById('analytics-revenue-caption');
+        if (bookingCaption) bookingCaption.textContent = `Non-cancelled appointments across the ${getAnalyticsRangeLabel(currentAdminAnalyticsRange)}.`;
+        if (revenueCaption) revenueCaption.textContent = `Completed booking value across the ${getAnalyticsRangeLabel(currentAdminAnalyticsRange)}.`;
+
+        renderAnalyticsBars('analytics-bookings-chart', bookingsTrend, 'bookings');
+        renderAnalyticsBars('analytics-revenue-chart', revenueTrend, 'revenue', 'revenue');
+        renderAnalyticsRankingList('analytics-category-breakdown', categoryItems, 'No completed booking data for categories yet.');
+        renderAnalyticsRankingList('analytics-service-breakdown', serviceItems, 'No completed service data yet.');
+
+        const topStoresBody = document.getElementById('analytics-top-stores-tbody');
+        if (topStoresBody) {
+            if (topStores.length === 0) {
+                topStoresBody.innerHTML = '<tr><td colspan="6">No venue performance data yet.</td></tr>';
+            } else {
+                topStoresBody.innerHTML = topStores.map((entry) => `
+                    <tr>
+                        <td><strong>${escapeHtml(entry.merchant.name || 'Venue')}</strong></td>
+                        <td>${escapeHtml(entry.merchant.category || 'Uncategorized')}</td>
+                        <td>${formatCompactNumber(entry.bookings)}</td>
+                        <td>${formatIQDCompact(entry.revenue)}</td>
+                        <td>${entry.ratingCount > 0 ? `${entry.ratingAvg.toFixed(1)} (${formatCompactNumber(entry.ratingCount)} reviews)` : 'No reviews'}</td>
+                        <td>${entry.sponsored ? 'Sponsored Live' : 'Available'}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+    } catch (error) {
+        console.error('Error loading admin analytics:', error);
+        showToast('Failed to load admin analytics.', 'error');
+
+        const headline = document.getElementById('analytics-headline');
+        const subheadline = document.getElementById('analytics-subheadline');
+        const topStores = document.getElementById('analytics-top-stores-tbody');
+
+        if (headline) headline.textContent = 'Analytics unavailable';
+        if (subheadline) subheadline.textContent = 'There was a problem loading platform activity data.';
+        if (topStores) topStores.innerHTML = '<tr><td colspan="6">Error loading top venues.</td></tr>';
+    }
+};
+
 // Admin Tab Switching
 window.addEventListener('DOMContentLoaded', () => {
     const adminTabs = document.querySelectorAll('.admin-tab');
     adminTabs.forEach(tab => {
         tab.addEventListener('click', () => {
-            adminTabs.forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-
-            // Hide all panels
-            document.querySelectorAll('.admin-panel').forEach(p => p.style.display = 'none');
-
-            // Show target panel
-            const targetId = `admin-${tab.dataset.tab}`;
-            document.getElementById(targetId).style.display = 'block';
-
-            // Load data for the tab
-            if (tab.dataset.tab === 'stores') loadAdminStores();
-            if (tab.dataset.tab === 'offers') loadAdminOffers();
-            if (tab.dataset.tab === 'sponsors') loadAdminSponsors();
-            if (tab.dataset.tab === 'financials') loadFinancials();
-            if (tab.dataset.tab === 'users') loadAdminUsers();
+            activateAdminTab(tab.dataset.tab);
         });
     });
+    updateAnalyticsRangeButtons();
 });
 
 // Load admin stores
@@ -1488,6 +3176,9 @@ window.editStore = function (id) {
     document.getElementById('store-name').value = store.name;
     document.getElementById('store-type').value = store.type;
     document.getElementById('store-address').value = store.address || '';
+    
+    const policyEl = document.getElementById('store-cancellation-policy');
+    if (policyEl) policyEl.value = store.cancellationPolicy || '';
 
     const latEl = document.getElementById('store-lat');
     const lngEl = document.getElementById('store-lng');
@@ -1604,7 +3295,7 @@ function renderServicesForReorder(services) {
     }
 
     container.innerHTML = services.map((s, i) => `
-        <div class="sortable-item" draggable="true" data-index="${i}" data-name="${s.name}" data-price="${s.price}" data-duration="${s.duration}">
+        <div class="sortable-item" draggable="true" data-index="${i}" data-name="${s.name}" data-category="${s.category || ''}" data-price="${s.price}" data-duration="${s.duration}">
             <div class="drag-handle">
                 <div class="drag-handle-bar"></div>
                 <div class="drag-handle-bar"></div>
@@ -1751,6 +3442,7 @@ window.openEditServiceModal = function (index) {
     document.getElementById('service-modal-title').textContent = 'Edit Service';
     document.getElementById('service-edit-index').value = index;
     document.getElementById('service-edit-name').value = item.dataset.name;
+    document.getElementById('service-edit-category').value = item.dataset.category || '';
     document.getElementById('service-edit-price').value = item.dataset.price;
     document.getElementById('service-edit-duration').value = item.dataset.duration;
 
@@ -1762,6 +3454,7 @@ window.openAddServiceModal = function () {
     document.getElementById('service-modal-title').textContent = 'Add New Service';
     document.getElementById('service-edit-index').value = '-1'; // -1 indicates new service
     document.getElementById('service-form').reset();
+    document.getElementById('service-edit-category').value = '';
 
     document.getElementById('service-modal').style.display = 'flex';
 };
@@ -1788,6 +3481,7 @@ document.getElementById('service-form')?.addEventListener('submit', function (e)
 
     const index = parseInt(document.getElementById('service-edit-index').value);
     const name = document.getElementById('service-edit-name').value.trim();
+    const category = document.getElementById('service-edit-category').value.trim();
     const price = parseInt(document.getElementById('service-edit-price').value);
     const duration = parseInt(document.getElementById('service-edit-duration').value);
 
@@ -1803,7 +3497,7 @@ document.getElementById('service-form')?.addEventListener('submit', function (e)
         // Adding new service
         const newIndex = items.length;
         const newItemHtml = `
-            <div class="sortable-item" draggable="true" data-index="${newIndex}" data-name="${name}" data-price="${price}" data-duration="${duration}">
+            <div class="sortable-item" draggable="true" data-index="${newIndex}" data-name="${name}" data-category="${category}" data-price="${price}" data-duration="${duration}">
                 <div class="drag-handle">
                     <div class="drag-handle-bar"></div>
                     <div class="drag-handle-bar"></div>
@@ -1842,6 +3536,7 @@ document.getElementById('service-form')?.addEventListener('submit', function (e)
         const item = items[index];
         if (item) {
             item.dataset.name = name;
+            item.dataset.category = category;
             item.dataset.price = price;
             item.dataset.duration = duration;
             item.querySelector('.service-name').textContent = name;
@@ -1876,7 +3571,13 @@ window.toggleSuspend = async function (id, suspend) {
 
 // Close modal
 window.closeModal = function (modalId) {
-    document.getElementById(modalId).style.display = 'none';
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    modal.style.display = 'none';
+
+    if (modalId === 'booking-modal') {
+        resetBookingState();
+    }
 };
 
 // Helper to upload image
@@ -1915,6 +3616,7 @@ document.getElementById('store-form')?.addEventListener('submit', async (e) => {
             type: document.getElementById('store-type').value,
             category: document.getElementById('store-category').value,
             address: document.getElementById('store-address').value,
+            cancellationPolicy: document.getElementById('store-cancellation-policy')?.value || '',
             lat: latEl ? (parseFloat(latEl.value) || null) : null,
             lng: lngEl ? (parseFloat(lngEl.value) || null) : null,
             photoUrl: photoUrl
@@ -1928,6 +3630,7 @@ document.getElementById('store-form')?.addEventListener('submit', async (e) => {
             serviceItems.forEach(item => {
                 services.push({
                     name: item.dataset.name,
+                    category: item.dataset.category || '',
                     price: parseInt(item.dataset.price),
                     duration: parseInt(item.dataset.duration)
                 });
@@ -1972,7 +3675,7 @@ async function loadAdminOffers() {
     const tbody = document.getElementById('offers-tbody');
     if (!tbody) return;
 
-    tbody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
 
     try {
         const snapshot = await getDocs(collection(db, "offers"));
@@ -1982,26 +3685,39 @@ async function loadAdminOffers() {
         });
 
         if (allOffers.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">No offers yet</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #888;">No offers yet</td></tr>';
             return;
         }
 
         const now = new Date();
         tbody.innerHTML = allOffers.map(offer => {
             const store = allMerchants.find(m => m.id === offer.storeId);
-            const endDate = offer.endDate?.toDate ? offer.endDate.toDate() : new Date(offer.endDate);
-            const isExpired = endDate < now;
-            const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+            const startDate = toSafeDate(offer.startDate);
+            const endDate = toSafeDate(offer.endDate);
+            const isScheduled = startDate ? startDate > now : false;
+            const isExpired = endDate ? endDate < now : false;
+            const isActive = offer.active && !isScheduled && !isExpired;
+            const daysLeft = endDate ? Math.ceil((endDate - now) / (1000 * 60 * 60 * 24)) : null;
+            const durationLabel = isExpired
+                ? 'Ended'
+                : isScheduled
+                    ? `Starts ${startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+                    : daysLeft !== null
+                        ? `${daysLeft} days left`
+                        : 'No end date';
+            const statusText = isExpired ? 'Expired' : isScheduled ? 'Scheduled' : isActive ? 'Active' : 'Inactive';
+            const statusClass = isExpired ? 'expired' : isScheduled ? 'suspended' : isActive ? 'active' : 'suspended';
 
             return `
             <tr>
                 <td>${store?.name || 'Unknown'}</td>
                 <td>${offer.serviceName}</td>
                 <td><strong style="color: #16a34a;">${offer.discountPercent}% OFF</strong></td>
-                <td>${isExpired ? 'Ended' : `${daysLeft} days left`}</td>
+                <td>${formatOfferHours(offer)}</td>
+                <td>${durationLabel}</td>
                 <td>
-                    <span class="status-badge ${isExpired ? 'expired' : 'active'}">
-                        ${isExpired ? ' Expired' : ' Active'}
+                    <span class="status-badge ${statusClass}">
+                        ${statusText}
                     </span>
                 </td>
                 <td>
@@ -2011,21 +3727,33 @@ async function loadAdminOffers() {
         `}).join('');
     } catch (error) {
         console.error('Error loading offers:', error);
-        tbody.innerHTML = '<tr><td colspan="6">Error loading offers</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7">Error loading offers</td></tr>';
     }
 }
 
 window.openCreateOfferModal = function () {
+    const offerForm = document.getElementById('offer-form');
     const storeSelect = document.getElementById('offer-store');
-    storeSelect.innerHTML = allMerchants
-        .filter(m => !m.suspended)
+    if (!offerForm || !storeSelect) return;
+    offerForm.reset();
+
+    const activeStores = allMerchants.filter(m => !m.suspended);
+    if (activeStores.length === 0) {
+        showToast('No active stores available for offers.', 'error');
+        return;
+    }
+
+    storeSelect.innerHTML = activeStores
         .map(m => `<option value="${m.id}">${m.name}</option>`)
         .join('');
+
+    if (!storeSelect.value && storeSelect.options.length > 0) {
+        storeSelect.value = storeSelect.options[0].value;
+    }
 
     // Load services for first store
     updateOfferServices();
 
-    document.getElementById('offer-form').reset();
     document.getElementById('offer-modal').style.display = 'flex';
 };
 
@@ -2034,12 +3762,12 @@ function updateOfferServices() {
     const store = allMerchants.find(m => m.id === storeId);
     const serviceSelect = document.getElementById('offer-service');
 
-    if (store?.services) {
+    if (store?.services?.length) {
         serviceSelect.innerHTML = store.services.map((s, i) =>
             `<option value="${i}">${s.name} - ${s.price.toLocaleString()} IQD</option>`
         ).join('');
     } else {
-        serviceSelect.innerHTML = '<option>No services</option>';
+        serviceSelect.innerHTML = '<option value="">No services</option>';
     }
 }
 
@@ -2050,19 +3778,47 @@ document.getElementById('offer-form')?.addEventListener('submit', async (e) => {
 
     const storeId = document.getElementById('offer-store').value;
     const store = allMerchants.find(m => m.id === storeId);
-    const serviceIndex = parseInt(document.getElementById('offer-service').value);
+    const serviceIndex = parseInt(document.getElementById('offer-service').value, 10);
     const service = store?.services?.[serviceIndex];
 
-    const durationDays = parseInt(document.getElementById('offer-duration').value);
+    if (!store || !service) {
+        showToast('Please select a valid store and service.', 'error');
+        return;
+    }
+
+    const discountPercent = parseInt(document.getElementById('offer-discount').value, 10);
+    const durationDays = parseInt(document.getElementById('offer-duration').value, 10);
+    const validFromTime = normalizeOfferInputTime(document.getElementById('offer-start-time').value);
+    const validToTime = normalizeOfferInputTime(document.getElementById('offer-end-time').value);
+
+    if ((validFromTime && !validToTime) || (!validFromTime && validToTime)) {
+        showToast('Set both valid hours fields or leave both empty.', 'error');
+        return;
+    }
+    if (validFromTime && validToTime && validFromTime === validToTime) {
+        showToast('Offer start and end time cannot be the same.', 'error');
+        return;
+    }
+    if (!Number.isFinite(discountPercent) || discountPercent < 1 || discountPercent > 100) {
+        showToast('Discount must be between 1 and 100.', 'error');
+        return;
+    }
+    if (!Number.isFinite(durationDays) || durationDays < 1) {
+        showToast('Duration must be at least 1 day.', 'error');
+        return;
+    }
+
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + durationDays);
 
     // Use serviceName (not serviceIndex) so offers survive service reordering
     const offerData = {
         storeId,
-        storeName: store?.name,
-        serviceName: service?.name || 'Service',
-        discountPercent: parseInt(document.getElementById('offer-discount').value),
+        storeName: store.name,
+        serviceName: service.name,
+        discountPercent,
+        validFromTime: validFromTime || null,
+        validToTime: validToTime || null,
         startDate: Timestamp.now(),
         endDate: Timestamp.fromDate(endDate),
         active: true
@@ -2072,6 +3828,7 @@ document.getElementById('offer-form')?.addEventListener('submit', async (e) => {
         await addDoc(collection(db, "offers"), offerData);
         closeModal('offer-modal');
         loadAdminOffers();
+        showToast('Offer created successfully.', 'success');
     } catch (error) {
         console.error('Error creating offer:', error);
         showToast('Failed to create offer', 'error');
@@ -2198,6 +3955,100 @@ window.deleteSponsor = async function (id) {
         console.error('Error deleting sponsor:', error);
     }
 };
+
+// ========== ADMIN ORDERS FUNCTIONS ==========
+let currentAdminOrderFilter = 'all';
+
+window.filterAdminOrders = function (status) {
+    currentAdminOrderFilter = status;
+    const btns = document.querySelectorAll('#admin-orders .filter-btn');
+    btns.forEach(b => {
+        if (b.innerText.toLowerCase() === status || (status === 'all' && b.innerText === 'All')) {
+            b.classList.add('active');
+        } else {
+            b.classList.remove('active');
+        }
+    });
+    loadAdminOrders(status);
+};
+
+async function loadAdminOrders(status = 'all') {
+    const tbody = document.getElementById('admin-orders-tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="8">Loading...</td></tr>';
+
+    try {
+        const snapshot = await getDocs(collection(db, "orders"));
+        let orders = [];
+        snapshot.forEach(docSnap => {
+            orders.push({ id: docSnap.id, ...docSnap.data() });
+        });
+
+        orders.sort((a, b) => {
+            const dateA = toSafeDate(a.createdAt) || new Date(0);
+            const dateB = toSafeDate(b.createdAt) || new Date(0);
+            return dateB - dateA;
+        });
+
+        if (status !== 'all') {
+            orders = orders.filter(order => (order.status || '').toLowerCase() === status);
+        }
+
+        if (orders.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8">No orders found.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = orders.map(order => {
+            const createdAt = toSafeDate(order.createdAt);
+            const createdAtLabel = createdAt ? createdAt.toLocaleString() : 'N/A';
+            const statusValue = (order.status || 'pending').toLowerCase();
+            const items = Array.isArray(order.items) ? order.items : [];
+            const totalItems = Number(order.totalItems) || items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+            const previewItems = items.slice(0, 2).map(item => `${item.name || 'Item'} x${Number(item.quantity) || 1}`).join(', ');
+            const total = Number(order.subtotal ?? order.total ?? 0);
+
+            const actionButtons = statusValue === 'pending'
+                ? `
+                    <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'confirmed')">Confirm</button>
+                    <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                `
+                : statusValue === 'confirmed'
+                    ? `
+                        <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'fulfilled')">Fulfill</button>
+                        <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                    `
+                    : '<span style="color:#9ca3af; font-size:0.8rem;">No actions</span>';
+
+            return `
+                <tr>
+                    <td>#${order.id.slice(0, 8)}</td>
+                    <td>${order.storeName || 'Store'}</td>
+                    <td>
+                        <div>${order.customerName || 'Customer'}</div>
+                        <div style="font-size:0.78rem; color:#666;">${order.customerPhone || ''}</div>
+                    </td>
+                    <td>
+                        <div>${totalItems} item${totalItems === 1 ? '' : 's'}</div>
+                        <div style="font-size:0.78rem; color:#666;">${previewItems}${items.length > 2 ? ' ...' : ''}</div>
+                    </td>
+                    <td>${total.toLocaleString()} IQD</td>
+                    <td>${createdAtLabel}</td>
+                    <td>
+                        <span class="status-badge order-status-${statusValue}">
+                            ${statusValue.charAt(0).toUpperCase() + statusValue.slice(1)}
+                        </span>
+                    </td>
+                    <td>${actionButtons}</td>
+                </tr>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error('Error loading admin orders:', error);
+        tbody.innerHTML = '<tr><td colspan="8">Error loading orders.</td></tr>';
+    }
+}
 
 // ========== CUSTOMER SPONSOR BANNER ==========
 
@@ -2810,8 +4661,8 @@ window.loadAdminDashboard = async function () {
     document.getElementById('dashboard-owner').style.display = 'none';
     document.getElementById('dashboard-admin').style.display = 'block';
 
-    // Load initial data
-    loadAdminUsers();
+    // Default to analytics for sponsor and partnership conversations
+    activateAdminTab('analytics');
 }
 
 let allUsers = [];
@@ -2990,12 +4841,13 @@ window.printInvoice = function () {
 
 // Filter button handlers
 document.addEventListener('DOMContentLoaded', () => {
-    const filterBtns = document.querySelectorAll('.filter-btn');
+    const filterBtns = document.querySelectorAll('#admin-financials .financial-filters .filter-btn');
     filterBtns.forEach(btn => {
         btn.addEventListener('click', () => {
             filterBtns.forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            loadFinancials(btn.dataset.range);
+            const range = btn.dataset.range || currentFinancialFilter;
+            loadFinancials(range);
         });
     });
 });
@@ -3032,6 +4884,7 @@ window.loadOwnerDashboard = async function () {
 
             if (tab.dataset.tab === 'overview') loadOwnerOverview();
             if (tab.dataset.tab === 'bookings') loadOwnerBookings('all');
+            if (tab.dataset.tab === 'orders') loadOwnerOrders('all');
             if (tab.dataset.tab === 'calendar') loadOwnerCalendar();
             if (tab.dataset.tab === 'store') loadOwnerStore();
             if (tab.dataset.tab === 'financials') loadOwnerFinancials();
@@ -3115,6 +4968,7 @@ async function loadOwnerOverview() {
 
 // 2. Bookings Tab
 let currentBookingFilter = 'all';
+let currentOrderFilter = 'all';
 
 window.filterOwnerBookings = function (status) {
     currentBookingFilter = status;
@@ -3207,6 +5061,245 @@ async function loadOwnerBookings(status) {
     }
 }
 
+// 2a. Shop Orders Tab
+window.filterOwnerOrders = function (status) {
+    currentOrderFilter = status;
+    const btns = document.querySelectorAll('#owner-orders .filter-btn');
+    btns.forEach(b => {
+        if (b.innerText.toLowerCase() === status || (status === 'all' && b.innerText === 'All')) {
+            b.classList.add('active');
+        } else {
+            b.classList.remove('active');
+        }
+    });
+    loadOwnerOrders(status);
+};
+
+function parseDateValue(value) {
+    if (!value) return null;
+    const dateValue = value?.toDate ? value.toDate() : new Date(value);
+    return isNaN(dateValue.getTime()) ? null : dateValue;
+}
+
+async function loadOwnerOrders(status = 'all') {
+    const tbody = document.getElementById('owner-orders-tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
+
+    if (!currentUser || !currentUser.storeId) {
+        tbody.innerHTML = '<tr><td colspan="7">No store linked to this account.</td></tr>';
+        return;
+    }
+
+    try {
+        const q = query(collection(db, "orders"), where("storeId", "==", currentUser.storeId));
+        const snapshot = await getDocs(q);
+        let orders = [];
+        snapshot.forEach(d => orders.push({ id: d.id, ...d.data() }));
+
+        orders.sort((a, b) => {
+            const dateA = parseDateValue(a.createdAt) || new Date(0);
+            const dateB = parseDateValue(b.createdAt) || new Date(0);
+            return dateB - dateA;
+        });
+
+        if (status !== 'all') {
+            orders = orders.filter(o => (o.status || '').toLowerCase() === status);
+        }
+
+        if (orders.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7">No orders found.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = orders.map(order => {
+            const createdAt = parseDateValue(order.createdAt);
+            const createdAtLabel = createdAt ? createdAt.toLocaleString() : 'N/A';
+            const statusValue = (order.status || 'pending').toLowerCase();
+            const items = Array.isArray(order.items) ? order.items : [];
+            const totalItems = Number(order.totalItems) || items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+            const itemPreview = items.slice(0, 2).map(item => `${item.name || 'Item'} x${Number(item.quantity) || 1}`).join(', ');
+            const itemsLabel = items.length > 0
+                ? `<div>${totalItems} item${totalItems === 1 ? '' : 's'}</div><div style="font-size:0.78rem; color:#666;">${itemPreview}${items.length > 2 ? ' ...' : ''}</div>`
+                : '<span style="color:#888;">No items</span>';
+            const total = Number(order.subtotal ?? order.total ?? 0);
+
+            const actionButtons = statusValue === 'pending'
+                ? `
+                    <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'confirmed')">Confirm</button>
+                    <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                `
+                : statusValue === 'confirmed'
+                    ? `
+                        <button class="action-btn" onclick="updateShopOrderStatus('${order.id}', 'fulfilled')">Fulfill</button>
+                        <button class="action-btn danger" onclick="updateShopOrderStatus('${order.id}', 'cancelled')">Cancel</button>
+                    `
+                    : '<span style="color:#9ca3af; font-size:0.8rem;">No actions</span>';
+
+            return `
+                <tr>
+                    <td>#${order.id.slice(0, 8)}</td>
+                    <td>
+                        <div>${order.customerName || 'Customer'}</div>
+                        <div style="font-size:0.78rem; color:#666;">${order.customerPhone || ''}</div>
+                    </td>
+                    <td>${itemsLabel}</td>
+                    <td>${total.toLocaleString()} IQD</td>
+                    <td>${createdAtLabel}</td>
+                    <td>
+                        <span class="status-badge order-status-${statusValue}">
+                            ${statusValue.charAt(0).toUpperCase() + statusValue.slice(1)}
+                        </span>
+                    </td>
+                    <td>${actionButtons}</td>
+                </tr>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error("Error loading owner orders:", error);
+        tbody.innerHTML = '<tr><td colspan="7">Error loading orders.</td></tr>';
+    }
+}
+
+async function restockCancelledOrderItems(orderData) {
+    const storeId = orderData.storeId;
+    const items = Array.isArray(orderData.items) ? orderData.items : [];
+    if (!storeId || items.length === 0) return;
+
+    const storeRef = doc(db, "merchants", storeId);
+    const storeSnap = await getDoc(storeRef);
+    if (!storeSnap.exists()) return;
+
+    const storeData = storeSnap.data();
+    const products = Array.isArray(storeData.products) ? [...storeData.products] : [];
+    let hasStockChanges = false;
+
+    items.forEach(item => {
+        const itemName = (item.name || '').trim().toLowerCase();
+        const quantity = Math.max(0, Number(item.quantity) || 0);
+        if (!itemName || quantity <= 0) return;
+
+        const productIndex = products.findIndex(p => (p.name || '').trim().toLowerCase() === itemName);
+        if (productIndex === -1) return;
+
+        const currentStock = Math.max(0, Number(products[productIndex].stock) || 0);
+        products[productIndex] = {
+            ...products[productIndex],
+            stock: currentStock + quantity
+        };
+        hasStockChanges = true;
+    });
+
+    if (!hasStockChanges) return;
+
+    await updateDoc(storeRef, { products });
+
+    const merchantIndex = allMerchants.findIndex(m => m.id === storeId);
+    if (merchantIndex >= 0) {
+        allMerchants[merchantIndex] = { ...allMerchants[merchantIndex], products };
+    }
+}
+
+window.updateShopOrderStatus = async function (orderId, newStatus) {
+    const confirmMessages = {
+        confirmed: 'Confirm this order?',
+        fulfilled: 'Mark this order as fulfilled?',
+        cancelled: 'Cancel this order? Stock will be restored.'
+    };
+    if (!await showConfirm(confirmMessages[newStatus] || 'Update order status?')) return;
+
+    try {
+        const orderRef = doc(db, "orders", orderId);
+        const orderSnap = await getDoc(orderRef);
+        if (!orderSnap.exists()) {
+            showToast('Order not found.', 'error');
+            return;
+        }
+
+        const orderData = orderSnap.data();
+        if (currentUser.role === 'owner' && orderData.storeId !== currentUser.storeId) {
+            showToast('You can only manage orders for your own store.', 'error');
+            return;
+        }
+
+        const previousStatus = (orderData.status || 'pending').toLowerCase();
+        if (previousStatus === newStatus) {
+            showToast('Order is already in this status.', 'info');
+            return;
+        }
+
+        await updateDoc(orderRef, {
+            status: newStatus,
+            updatedAt: new Date().toISOString(),
+            updatedBy: currentUser.id || currentUser.phone || 'owner'
+        });
+
+        if (newStatus === 'cancelled' && previousStatus !== 'cancelled') {
+            await restockCancelledOrderItems(orderData);
+        }
+
+        showToast(`Order updated to ${newStatus}.`, 'success');
+        if (currentUser.role === 'owner') {
+            loadOwnerOrders(currentOrderFilter);
+        }
+        if (currentUser.role === 'admin') {
+            loadAdminOrders(currentAdminOrderFilter);
+        }
+    } catch (error) {
+        console.error('Error updating shop order:', error);
+        showToast('Failed to update order status.', 'error');
+    }
+};
+
+async function reconcileStoreCalendarEntries(bookingId, newStatus, canonicalEvent = null) {
+    const calendarQuery = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
+    const calendarSnapshot = await getDocs(calendarQuery);
+    const operations = [];
+
+    if (newStatus === 'cancelled') {
+        calendarSnapshot.forEach((calendarDoc) => {
+            operations.push(deleteDoc(doc(db, "storeCalendar", calendarDoc.id)));
+        });
+        await Promise.all(operations);
+        return;
+    }
+
+    if (newStatus === 'confirmed') {
+        let hasCanonicalDoc = false;
+        calendarSnapshot.forEach((calendarDoc) => {
+            if (calendarDoc.id === bookingId) {
+                hasCanonicalDoc = true;
+                return;
+            }
+            operations.push(deleteDoc(doc(db, "storeCalendar", calendarDoc.id)));
+        });
+
+        if (!hasCanonicalDoc && canonicalEvent) {
+            operations.push(setDoc(doc(db, "storeCalendar", bookingId), canonicalEvent));
+        }
+
+        await Promise.all(operations);
+        return;
+    }
+
+    if (newStatus === 'completed') {
+        const completedAt = new Date().toISOString();
+        calendarSnapshot.forEach((calendarDoc) => {
+            if (calendarDoc.id === bookingId) {
+                operations.push(updateDoc(doc(db, "storeCalendar", calendarDoc.id), {
+                    status: 'completed',
+                    updatedAt: completedAt
+                }));
+                return;
+            }
+            operations.push(deleteDoc(doc(db, "storeCalendar", calendarDoc.id)));
+        });
+
+        await Promise.all(operations);
+    }
+}
+
 // Update Booking Status (Confirm/Reject/Complete)
 window.updateBookingStatus = async function (bookingId, newStatus) {
     // Confirmation messages for each action
@@ -3221,77 +5314,128 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
 
     try {
         const bookingRef = doc(db, "bookings", bookingId);
-        const bookingSnap = await getDoc(bookingRef);
+        const calendarRef = doc(db, "storeCalendar", bookingId);
+        const normalizedNewStatus = getNormalizedBookingStatus(newStatus);
 
-        if (!bookingSnap.exists()) {
-            showToast('Booking not found!', 'error');
-            return;
-        }
+        const transactionResult = await runTransaction(db, async (transaction) => {
+            const bookingSnap = await transaction.get(bookingRef);
+            if (!bookingSnap.exists()) {
+                throw new Error('Booking not found!');
+            }
 
-        const bookingData = bookingSnap.data();
+            const bookingData = bookingSnap.data();
 
-        // Authorization: Only the merchant who owns this booking's store (or admin) can update
-        if (currentUser.role === 'owner' && bookingData.storeId !== currentUser.storeId) {
-            showToast('You can only update bookings for your own store.', 'error');
-            return;
-        }
+            // Authorization: Only the merchant who owns this booking's store (or admin) can update
+            if (currentUser.role === 'owner' && bookingData.storeId !== currentUser.storeId) {
+                throw new Error('You can only update bookings for your own store.');
+            }
 
-        // Update booking status
-        await updateDoc(bookingRef, {
-            status: newStatus,
-            updatedAt: new Date().toISOString()
+            const previousStatus = getNormalizedBookingStatus(bookingData.status || 'pending');
+            const statusChanged = previousStatus !== normalizedNewStatus;
+            const calendarSnap = await transaction.get(calendarRef);
+            const slotRef = getBookingSlotRef(
+                bookingData.storeId || bookingData.merchantId || '',
+                bookingData.bookingDate,
+                bookingData.bookingTime || bookingData.time
+            );
+            const slotSnap = await transaction.get(slotRef);
+            const slotState = getSlotAvailabilityState(slotSnap);
+            const updatedAt = new Date().toISOString();
+            let calendarEvent = null;
+
+            transaction.update(bookingRef, {
+                status: normalizedNewStatus,
+                updatedAt
+            });
+
+            if (normalizedNewStatus === 'confirmed') {
+                const existingCalendar = calendarSnap.exists() ? calendarSnap.data() : {};
+                calendarEvent = {
+                    bookingId: bookingId,
+                    storeId: bookingData.storeId || '',
+                    storeName: bookingData.storeName || '',
+                    customerName: bookingData.customerName || 'Customer',
+                    customerPhone: bookingData.customerPhone || '',
+                    serviceName: bookingData.serviceName || 'Service',
+                    staffMember: bookingData.staffMember || null,
+                    price: bookingData.price || 0,
+                    duration: bookingData.serviceDuration || bookingData.duration || 30,
+                    bookingDate: bookingData.bookingDate || new Date().toISOString(),
+                    bookingTime: bookingData.bookingTime || bookingData.time || '10:00',
+                    status: 'confirmed',
+                    createdAt: existingCalendar.createdAt || updatedAt,
+                    updatedAt
+                };
+                transaction.set(calendarRef, calendarEvent, { merge: true });
+            } else if (normalizedNewStatus === 'cancelled') {
+                if (calendarSnap.exists()) {
+                    transaction.delete(calendarRef);
+                }
+                if (slotSnap.exists()) {
+                    const assignedStaff = normalizeStaffMember(bookingData.staffMember);
+                    const nextTotalBookings = Math.max(0, slotState.totalBookings - 1);
+                    const nextOccupiedStaffIds = assignedStaff?.id
+                        ? slotState.occupiedStaffIds.filter(id => id !== String(assignedStaff.id))
+                        : slotState.occupiedStaffIds;
+                    const normalizedAssignedName = String(assignedStaff?.name || '').trim().toLowerCase();
+                    const nextOccupiedStaffNames = normalizedAssignedName
+                        ? slotState.occupiedStaffNames.filter(name => name !== normalizedAssignedName)
+                        : slotState.occupiedStaffNames;
+                    const nextBookingIds = slotState.bookingIds.filter(id => id !== bookingId);
+
+                    if (nextTotalBookings <= 0) {
+                        transaction.delete(slotRef);
+                    } else {
+                        transaction.set(slotRef, {
+                            totalBookings: nextTotalBookings,
+                            occupiedStaffIds: nextOccupiedStaffIds,
+                            occupiedStaffNames: nextOccupiedStaffNames,
+                            bookingIds: nextBookingIds,
+                            updatedAt
+                        }, { merge: true });
+                    }
+                }
+            } else if (normalizedNewStatus === 'completed') {
+                if (calendarSnap.exists()) {
+                    transaction.update(calendarRef, {
+                        status: 'completed',
+                        updatedAt
+                    });
+                }
+            }
+
+            return {
+                bookingData,
+                previousStatus,
+                statusChanged,
+                calendarEvent
+            };
         });
 
-        // If confirmed, add to store calendar
-        if (newStatus === 'confirmed') {
-            const calendarEvent = {
-                bookingId: bookingId,
-                storeId: bookingData.storeId || '',
-                storeName: bookingData.storeName || '',
-                customerName: bookingData.customerName || 'Customer',
-                customerPhone: bookingData.customerPhone || '',
-                serviceName: bookingData.serviceName || 'Service',
-                price: bookingData.price || 0,
-                duration: bookingData.serviceDuration || bookingData.duration || 30,
-                bookingDate: bookingData.bookingDate || new Date().toISOString(),
-                bookingTime: bookingData.bookingTime || bookingData.time || '10:00',
-                status: 'confirmed',
-                createdAt: new Date().toISOString()
-            };
-
-            await addDoc(collection(db, "storeCalendar"), calendarEvent);
+        if (normalizedNewStatus === 'confirmed') {
+            await reconcileStoreCalendarEntries(bookingId, 'confirmed', transactionResult.calendarEvent);
             showToast(' Booking Confirmed & Added to Calendar!', 'success');
-        } else if (newStatus === 'cancelled') {
-            // Remove from calendar if exists
-            const calQ = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
-            const calSnap = await getDocs(calQ);
-            calSnap.forEach(async (d) => {
-                await deleteDoc(doc(db, "storeCalendar", d.id));
-            });
+        } else if (normalizedNewStatus === 'cancelled') {
+            await reconcileStoreCalendarEntries(bookingId, 'cancelled');
             showToast(' Booking Declined', 'info');
-        } else if (newStatus === 'completed') {
-            // Update calendar event status
-            const calQ = query(collection(db, "storeCalendar"), where("bookingId", "==", bookingId));
-            const calSnap = await getDocs(calQ);
-            calSnap.forEach(async (d) => {
-                await updateDoc(doc(db, "storeCalendar", d.id), { status: 'completed' });
-            });
+        } else if (normalizedNewStatus === 'completed') {
+            await reconcileStoreCalendarEntries(bookingId, 'completed');
 
             // === FINANCIAL TRACKING ===
             // Handle both legacy and new price fields
             let servicePrice = 0;
-            if (bookingData.price !== undefined) servicePrice = Number(bookingData.price);
-            else if (bookingData.servicePrice !== undefined) servicePrice = Number(bookingData.servicePrice);
+            if (transactionResult.bookingData.price !== undefined) servicePrice = Number(transactionResult.bookingData.price);
+            else if (transactionResult.bookingData.servicePrice !== undefined) servicePrice = Number(transactionResult.bookingData.servicePrice);
 
             const commission = Math.round(servicePrice * 0.10); // 10% commission
-            const storeId = bookingData.storeId || bookingData.merchantId || currentUser.storeId;
+            const storeId = transactionResult.bookingData.storeId || transactionResult.bookingData.merchantId || currentUser.storeId;
 
-            console.log('Financial tracking:', { storeId, servicePrice, commission, raw: bookingData });
+            console.log('Financial tracking:', { storeId, servicePrice, commission, raw: transactionResult.bookingData });
 
             if (!storeId) {
                 console.error('No storeId found for financial tracking!');
                 showToast('Warning: Financials not updated (missing store ID)', 'warning');
-            } else {
+            } else if (transactionResult.statusChanged) {
                 // Update store financials
                 const storeFinRef = doc(db, "storeFinancials", storeId);
 
@@ -3308,7 +5452,7 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
                     } else {
                         await setDoc(storeFinRef, {
                             storeId: storeId,
-                            storeName: bookingData.storeName || '',
+                            storeName: transactionResult.bookingData.storeName || '',
                             totalRevenue: servicePrice,
                             totalCommission: commission,
                             paidCommission: 0,
@@ -3325,13 +5469,13 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
                 try {
                     await addDoc(collection(db, "storeTransactions"), {
                         storeId: storeId,
-                        storeName: bookingData.storeName || '',
+                        storeName: transactionResult.bookingData.storeName || '',
                         bookingId: bookingId,
                         type: 'revenue',
                         amount: servicePrice,
                         commission: commission,
-                        serviceName: bookingData.serviceName || 'Service',
-                        customerName: bookingData.customerName || 'Customer',
+                        serviceName: transactionResult.bookingData.serviceName || 'Service',
+                        customerName: transactionResult.bookingData.customerName || 'Customer',
                         createdAt: new Date().toISOString()
                     });
                 } catch (err) {
@@ -3344,6 +5488,8 @@ window.updateBookingStatus = async function (bookingId, newStatus) {
                 if (document.getElementById('owner-financials').style.display !== 'none') {
                     loadOwnerFinancials();
                 }
+            } else {
+                showToast(' Booking already marked as completed.', 'info');
             }
         }
 
@@ -3533,24 +5679,36 @@ async function loadOwnerStore() {
     const store = allMerchants.find(m => m.id === currentUser.storeId);
 
     if (!store) return;
+    const derivedWorkerCount = getLegacyAwareWorkerCount(store);
 
     // Populate Form
     document.getElementById('owner-store-name').value = store.name;
     document.getElementById('owner-store-address').value = store.address || '';
-    document.getElementById('owner-store-workers').value = store.workerCount || 1;
+    document.getElementById('owner-store-workers').value = derivedWorkerCount;
+    document.getElementById('owner-cancellation-policy').value = store.cancellationPolicy || '';
     document.getElementById('owner-store-lat').value = store.lat || '';
     document.getElementById('owner-store-lng').value = store.lng || '';
 
     // Services
     renderOwnerServices(store.services || []);
+    
+    // Staff
+    if(window.renderOwnerStaff) {
+        renderOwnerStaff(store.staff || []);
+    }
+
+    // Products
+    if (window.renderOwnerProducts) {
+        renderOwnerProducts(store.products || []);
+    }
 }
 
 function renderOwnerServices(services) {
     const list = document.getElementById('owner-services-list');
     list.innerHTML = services.map((s, i) => `
          <div class="sortable-item">
-            <div class="service-info">
-                <div class="service-name">${s.name}</div>
+             <div class="service-info">
+                <div class="service-name">${s.name} ${s.category ? `<span style="font-size: 0.75rem; background: #eee; padding: 2px 6px; border-radius: 4px; margin-left: 8px;">${s.category}</span>` : ''}</div>
                 <div class="service-meta">${s.duration} mins • ${s.price.toLocaleString()} IQD</div>
             </div>
              <div class="service-actions">
@@ -3721,24 +5879,26 @@ window.saveOwnerStoreDetails = async function () {
     try {
         const nameEle = document.getElementById('owner-store-name');
         const addressEle = document.getElementById('owner-store-address');
-        const workersEle = document.getElementById('owner-store-workers');
         const latEle = document.getElementById('owner-store-lat');
         const lngEle = document.getElementById('owner-store-lng');
         const photoFile = document.getElementById('owner-store-photo-file').files[0];
 
-        if (!nameEle || !workersEle) {
+        if (!nameEle) {
             alert("Error: Critical form elements are missing from the page.");
             return;
         }
 
         const name = nameEle.value;
         const address = addressEle ? addressEle.value : '';
-        const workerCount = Math.max(1, parseInt(workersEle.value) || 1);
+        const store = allMerchants.find(m => m.id === currentUser?.storeId);
+        const workerCount = getLegacyAwareWorkerCount(store);
+        const cancellationPolicy = document.getElementById('owner-cancellation-policy')?.value || '';
         
         let updateData = {
             name: name,
             address: address,
-            workerCount: workerCount
+            workerCount: workerCount,
+            cancellationPolicy: cancellationPolicy
         };
 
         if (latEle && lngEle) {
@@ -3787,6 +5947,7 @@ window.openAddServiceModalForOwner = function () {
     document.getElementById('service-modal-title').innerText = 'Add New Service';
     document.getElementById('service-edit-index').value = -1; // New
     document.getElementById('service-edit-name').value = '';
+    document.getElementById('service-edit-category').value = '';
     document.getElementById('service-edit-price').value = '';
     document.getElementById('service-edit-duration').value = '';
 
@@ -3805,6 +5966,7 @@ window.editOwnerService = function (index) {
     document.getElementById('service-modal-title').innerText = 'Edit Service';
     document.getElementById('service-edit-index').value = index;
     document.getElementById('service-edit-name').value = service.name;
+    document.getElementById('service-edit-category').value = service.category || '';
     document.getElementById('service-edit-price').value = service.price;
     document.getElementById('service-edit-duration').value = service.duration;
 
@@ -3831,6 +5993,7 @@ window.deleteOwnerService = async function (index) {
 async function saveOwnerService(e) {
     e.preventDefault();
     const name = document.getElementById('service-edit-name').value;
+    const category = document.getElementById('service-edit-category').value;
     const price = parseInt(document.getElementById('service-edit-price').value);
     const duration = parseInt(document.getElementById('service-edit-duration').value);
     const index = parseInt(document.getElementById('service-edit-index').value);
@@ -3838,7 +6001,7 @@ async function saveOwnerService(e) {
     const store = allMerchants.find(m => m.id === currentUser.storeId);
     if (!store.services) store.services = [];
 
-    const newService = { name, price, duration };
+    const newService = { name, category, price, duration };
 
     if (index === -1) {
         store.services.push(newService);
@@ -3849,10 +6012,319 @@ async function saveOwnerService(e) {
     try {
         await updateDoc(doc(db, "merchants", currentUser.storeId), { services: store.services });
         renderOwnerServices(store.services);
+        document.getElementById('service-edit-category').value = '';
         closeModal('service-modal');
     } catch (e) {
         console.error(e);
         showToast('Error saving service', 'error');
+    }
+}
+
+// ========== STAFF MEMBERS (OWNER) ==========
+window.renderOwnerStaff = function (staffArray) {
+    const list = document.getElementById('owner-staff-list');
+    if (!list) return;
+
+    const normalizedStaff = normalizeStaffCollection(staffArray);
+    if (normalizedStaff.length === 0) {
+        list.innerHTML = `
+            <div class="empty-state" style="padding: 18px; font-size: 0.9rem;">
+                No named workers yet. Add staff members here to control who customers can book with.
+            </div>
+        `;
+        return;
+    }
+
+    list.innerHTML = normalizedStaff.map((st, i) => `
+         <div class="sortable-item">
+            ${st.image ? `<img src="${st.image}" style="width:40px; height:40px; border-radius:50%; object-fit:cover; margin-right:10px;">` : `<div style="width:40px; height:40px; border-radius:50%; background:#e2e8f0; display:flex; align-items:center; justify-content:center; margin-right:10px; font-weight:bold; color:#64748b;">${st.name.charAt(0)}</div>`}
+             <div class="service-info">
+                <div class="service-name">${st.name}</div>
+                <div class="service-meta" style="color:var(--primary); font-weight:500;">${st.role || 'Staff Member'}</div>
+            </div>
+             <div class="service-actions">
+                <button type="button" class="service-action-btn edit" onclick="editOwnerStaff(${i})">️</button>
+                <button type="button" class="service-action-btn delete" onclick="deleteOwnerStaff(${i})">️</button>
+            </div>
+        </div>
+    `).join('');
+};
+
+window.openAddStaffModalForOwner = function () {
+    document.getElementById('staff-modal-title').textContent = 'Add New Staff Member';
+    document.getElementById('staff-edit-index').value = '-1';
+    document.getElementById('staff-form').reset();
+
+    const form = document.getElementById('staff-form');
+    form.onsubmit = saveOwnerStaff;
+
+    document.getElementById('staff-modal').style.display = 'flex';
+};
+
+window.editOwnerStaff = function (index) {
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    const normalizedStaff = normalizeStaffCollection(store?.staff);
+    const st = normalizedStaff[index];
+    if (!st) return;
+
+    document.getElementById('staff-modal-title').textContent = 'Edit Staff Member';
+    document.getElementById('staff-edit-index').value = index;
+    document.getElementById('staff-edit-name').value = st.name;
+    document.getElementById('staff-edit-role').value = st.role || '';
+    document.getElementById('staff-edit-image').value = st.image || '';
+
+    const form = document.getElementById('staff-form');
+    form.onsubmit = saveOwnerStaff;
+
+    document.getElementById('staff-modal').style.display = 'flex';
+};
+
+function serializeStaffForStorage(staffArray = []) {
+    return normalizeStaffCollection(staffArray).map(staff => ({
+        id: staff.id,
+        name: staff.name,
+        role: staff.role || '',
+        image: staff.image || '',
+        active: staff.active !== false
+    }));
+}
+
+async function getFutureBookingsForStaff(storeId, staffMember) {
+    const normalizedStaff = normalizeStaffMember(staffMember);
+    if (!storeId || !normalizedStaff) return [];
+
+    const bookingsQuery = query(collection(db, "bookings"), where("storeId", "==", storeId));
+    const snapshot = await getDocs(bookingsQuery);
+    const now = new Date();
+
+    return snapshot.docs
+        .map(docSnap => ({ id: docSnap.id, ...docSnap.data() }))
+        .filter((booking) => {
+            const status = getNormalizedBookingStatus(booking.status);
+            if (!['pending', 'confirmed'].includes(status)) return false;
+
+            const bookingDate = getBookingDateValue(booking);
+            if (!bookingDate || bookingDate < now) return false;
+
+            return doesBookingMatchSelectedStaff(booking, normalizedStaff);
+        });
+}
+
+window.deleteOwnerStaff = async function (index) {
+    if (!await showConfirm('Are you sure you want to delete this staff member?')) return;
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store) return;
+    const normalizedStaff = normalizeStaffCollection(store.staff);
+    const staffToDelete = normalizedStaff[index];
+    if (!staffToDelete) return;
+
+    const futureBookings = await getFutureBookingsForStaff(currentUser.storeId, staffToDelete);
+    if (futureBookings.length > 0) {
+        showToast(`Reassign or cancel ${futureBookings.length} upcoming booking${futureBookings.length === 1 ? '' : 's'} for ${staffToDelete.name} before removing this worker.`, 'error');
+        return;
+    }
+
+    const nextStaff = normalizedStaff.filter((_, staffIndex) => staffIndex !== index);
+    const workerCount = getPersistedWorkerCount(nextStaff);
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), {
+            staff: serializeStaffForStorage(nextStaff),
+            workerCount
+        });
+        store.staff = serializeStaffForStorage(nextStaff);
+        store.workerCount = workerCount;
+        renderOwnerStaff(store.staff);
+        const workersInput = document.getElementById('owner-store-workers');
+        if (workersInput) workersInput.value = workerCount;
+        showToast('Staff member removed.', 'success');
+    } catch (e) {
+        console.error(e);
+        showToast('Error deleting staff member', 'error');
+    }
+};
+
+async function saveOwnerStaff(e) {
+    e.preventDefault();
+    const name = document.getElementById('staff-edit-name').value.trim();
+    const role = document.getElementById('staff-edit-role').value.trim();
+    const image = document.getElementById('staff-edit-image').value.trim();
+    const index = parseInt(document.getElementById('staff-edit-index').value);
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store) return;
+
+    const normalizedStaff = normalizeStaffCollection(store.staff);
+    const duplicateName = normalizedStaff.some((staffMember, staffIndex) => {
+        if (staffIndex === index) return false;
+        return normalizeTextForSearch(staffMember.name) === normalizeTextForSearch(name);
+    });
+    if (duplicateName) {
+        showToast('Each worker needs a unique name.', 'error');
+        return;
+    }
+
+    const existingId = index >= 0 ? (normalizedStaff[index]?.id || null) : null;
+    const newStaff = {
+        id: existingId || `staff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name,
+        role,
+        image,
+        active: true
+    };
+
+    const nextStaff = [...normalizedStaff];
+    if (index === -1) {
+        nextStaff.push(newStaff);
+    } else {
+        nextStaff[index] = newStaff;
+    }
+
+    const serializedStaff = serializeStaffForStorage(nextStaff);
+    const workerCount = getPersistedWorkerCount(serializedStaff);
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), {
+            staff: serializedStaff,
+            workerCount
+        });
+        store.staff = serializedStaff;
+        store.workerCount = workerCount;
+        renderOwnerStaff(store.staff);
+        const workersInput = document.getElementById('owner-store-workers');
+        if (workersInput) workersInput.value = workerCount;
+        closeModal('staff-modal');
+        showToast('Staff member saved.', 'success');
+    } catch (e) {
+        console.error(e);
+        showToast('Error saving staff member', 'error');
+    }
+}
+
+// ========== PRODUCTS (OWNER SHOP) ==========
+window.renderOwnerProducts = function (productsArray) {
+    const list = document.getElementById('owner-products-list');
+    if (!list) return;
+
+    if (!productsArray || productsArray.length === 0) {
+        list.innerHTML = `
+            <div class="empty-state" style="padding: 18px; font-size: 0.9rem;">
+                No products yet. Add your first product to start selling in the Shop tab.
+            </div>
+        `;
+        return;
+    }
+
+    list.innerHTML = productsArray.map((p, i) => {
+        const price = Number(p.price) || 0;
+        const stock = Number(p.stock) || 0;
+        const image = p.image || '';
+        return `
+            <div class="sortable-item">
+                ${image
+                    ? `<img src="${image}" alt="${p.name}" style="width:40px; height:40px; border-radius:8px; object-fit:cover; margin-right:10px;">`
+                    : `<div style="width:40px; height:40px; border-radius:8px; background:#f3f4f6; display:flex; align-items:center; justify-content:center; margin-right:10px; color:#9ca3af; font-size:0.85rem;">IMG</div>`
+                }
+                <div class="service-info">
+                    <div class="service-name">${p.name}</div>
+                    <div class="service-meta">${price.toLocaleString()} IQD • Stock: ${stock}</div>
+                </div>
+                <div class="service-actions">
+                    <button type="button" class="service-action-btn edit" onclick="editOwnerProduct(${i})">️</button>
+                    <button type="button" class="service-action-btn delete" onclick="deleteOwnerProduct(${i})">️</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+};
+
+window.openAddProductModalForOwner = function () {
+    const form = document.getElementById('product-form');
+    if (!form) return;
+    document.getElementById('product-modal-title').textContent = 'Add Product';
+    document.getElementById('product-edit-index').value = '-1';
+    form.reset();
+    form.onsubmit = saveOwnerProduct;
+    document.getElementById('product-modal').style.display = 'flex';
+};
+
+window.editOwnerProduct = function (index) {
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store?.products?.[index]) return;
+    const product = store.products[index];
+
+    document.getElementById('product-modal-title').textContent = 'Edit Product';
+    document.getElementById('product-edit-index').value = String(index);
+    document.getElementById('product-edit-name').value = product.name || '';
+    document.getElementById('product-edit-price').value = Number(product.price) || 0;
+    document.getElementById('product-edit-stock').value = Number(product.stock) || 0;
+    document.getElementById('product-edit-image').value = product.image || '';
+
+    const form = document.getElementById('product-form');
+    form.onsubmit = saveOwnerProduct;
+    document.getElementById('product-modal').style.display = 'flex';
+};
+
+window.deleteOwnerProduct = async function (index) {
+    if (!await showConfirm('Delete this product from your shop?')) return;
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store) return;
+    if (!Array.isArray(store.products)) store.products = [];
+    store.products.splice(index, 1);
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { products: store.products });
+        renderOwnerProducts(store.products);
+        showToast('Product removed.', 'success');
+    } catch (e) {
+        console.error('Delete product error:', e);
+        showToast('Error deleting product', 'error');
+    }
+};
+
+async function saveOwnerProduct(e) {
+    e.preventDefault();
+
+    const name = document.getElementById('product-edit-name').value.trim();
+    const price = parseInt(document.getElementById('product-edit-price').value, 10);
+    const stock = parseInt(document.getElementById('product-edit-stock').value, 10);
+    const image = document.getElementById('product-edit-image').value.trim();
+    const index = parseInt(document.getElementById('product-edit-index').value, 10);
+
+    if (!name) {
+        showToast('Product name is required.', 'error');
+        return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+        showToast('Product price must be 0 or higher.', 'error');
+        return;
+    }
+    if (!Number.isFinite(stock) || stock < 0) {
+        showToast('Product stock must be 0 or higher.', 'error');
+        return;
+    }
+
+    const store = allMerchants.find(m => m.id === currentUser.storeId);
+    if (!store) return;
+    if (!Array.isArray(store.products)) store.products = [];
+
+    const newProduct = { name, price, stock, image };
+    if (index === -1) {
+        store.products.push(newProduct);
+    } else {
+        store.products[index] = newProduct;
+    }
+
+    try {
+        await updateDoc(doc(db, "merchants", currentUser.storeId), { products: store.products });
+        renderOwnerProducts(store.products);
+        closeModal('product-modal');
+        showToast('Product saved successfully.', 'success');
+    } catch (e) {
+        console.error('Save product error:', e);
+        showToast('Error saving product', 'error');
     }
 }
 
@@ -3956,9 +6428,9 @@ function renderServiceSearchStep(step) {
                 <input type="number" id="budget-input" class="budget-input" placeholder="e.g. 40000" min="0" step="1000">
                 <span class="budget-currency">IQD</span>
             </div>
-            <p style="color: var(--text-light); font-size: 0.8rem; text-align: center; margin-top: 10px;">Leave empty to see all salons offering this service</p>
+            <p style="color: var(--text-light); font-size: 0.8rem; text-align: center; margin-top: 10px;">Leave empty to see all venues offering this service</p>
             <button class="btn-primary" style="width: 100%; margin-top: 24px;" onclick="applyServiceBudgetFilter()">
-                 Search Salons
+                 Search Venues
             </button>
         `;
         // Allow pressing Enter to search
@@ -3971,7 +6443,7 @@ function renderServiceSearchStep(step) {
         body.innerHTML = `
             <div style="text-align:center; padding:60px 0;">
                 <div style="font-size:2rem; margin-bottom:12px;"></div>
-                <p style="color: var(--text-light);">Searching salons...</p>
+                <p style="color: var(--text-light);">Searching venues...</p>
             </div>
         `;
         setTimeout(() => renderServiceSearchResults(), 100);
@@ -3994,33 +6466,94 @@ window.applyServiceBudgetFilter = function () {
     renderServiceSearchStep('results');
 };
 
+function getServiceSearchCategoryConfig(categoryKey) {
+    return SERVICE_CATEGORIES.find(category => category.key === categoryKey) || null;
+}
+
+function getServiceSearchMatchScore(service, merchant, selectedSubService, categoryConfig) {
+    const searchParts = [
+        selectedSubService,
+        categoryConfig?.name,
+        categoryConfig?.key
+    ].filter(Boolean);
+    const queryText = searchParts.join(' ');
+    if (!queryText) return 0;
+
+    const serviceBlob = normalizeTextForSearch([
+        service?.name,
+        service?.category,
+        merchant?.name,
+        merchant?.category,
+        merchant?.type,
+        merchant?.description,
+        merchant?.about
+    ].filter(Boolean).join(' '));
+    if (!doesNormalizedSearchTextMatchQuery(serviceBlob, queryText)) {
+        return 0;
+    }
+
+    let score = 0;
+    const normalizedServiceName = normalizeTextForSearch(service?.name);
+    const normalizedCategory = normalizeTextForSearch(service?.category || merchant?.category);
+    const normalizedSubService = normalizeTextForSearch(selectedSubService);
+
+    if (normalizedSubService && normalizedServiceName.includes(normalizedSubService)) score += 10;
+    if (normalizedSubService && normalizedCategory.includes(normalizedSubService)) score += 5;
+    if (categoryConfig && doesNormalizedSearchTextMatchQuery(normalizedCategory, `${categoryConfig.name} ${categoryConfig.key}`)) score += 4;
+
+    const tokenGroups = getSearchTokens(queryText).map(getAliasGroupForToken);
+    tokenGroups.forEach(group => {
+        if (Array.from(group).some(term => serviceBlob.includes(term))) {
+            score += 2;
+        }
+    });
+
+    return score;
+}
+
 function renderServiceSearchResults() {
     const body = document.getElementById('service-search-body');
     const { selectedSubService, budget } = serviceSearchState;
-    const key = selectedSubService.toLowerCase();
+    const categoryConfig = getServiceSearchCategoryConfig(serviceSearchState.selectedCategory);
 
     // Find merchants with a matching service
     const results = [];
     allMerchants.forEach(merchant => {
         if (!merchant.services || merchant.services.length === 0) return;
         merchant.services.forEach(s => {
-            if (!s.name.toLowerCase().includes(key)) return;
+            const matchScore = getServiceSearchMatchScore(s, merchant, selectedSubService, categoryConfig);
+            if (matchScore <= 0) return;
             if (budget !== null && s.price > budget) return;
-            results.push({ merchant, service: s });
+            const rating = getStoreRating(merchant.id);
+            results.push({
+                merchant,
+                service: s,
+                matchScore,
+                ratingAvg: parseFloat(rating.avg) || 0,
+                ratingCount: rating.count || 0
+            });
         });
     });
 
+    results.sort((a, b) => {
+        if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+        if (b.ratingAvg !== a.ratingAvg) return b.ratingAvg - a.ratingAvg;
+        if (b.ratingCount !== a.ratingCount) return b.ratingCount - a.ratingCount;
+        return (Number(a.service.price) || 0) - (Number(b.service.price) || 0);
+    });
+
     const budgetLabel = budget ? `Budget: ${budget.toLocaleString()} IQD` : 'No budget limit';
+    const categoryLabel = categoryConfig ? ` · ${categoryConfig.name.trim()}` : '';
 
     if (results.length === 0) {
         body.innerHTML = `
             <button class="btn-back" onclick="renderServiceSearchStep('budget')">← Back</button>
             <h2 style="margin-bottom:6px;">${selectedSubService}</h2>
-            <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}</p>
+            <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}${categoryLabel}</p>
             <div class="empty-state" style="padding: 40px 0;">
                 <div style="font-size:3rem; margin-bottom:12px;"></div>
-                <p>No salons found for this service${budget ? ' in your budget' : ''}.</p>
-                <button class="btn-outline" style="margin-top:16px;" onclick="renderServiceSearchStep('budget')">Try a higher budget</button>
+                <p>No venues found for this service${budget ? ' in your budget' : ''}.</p>
+                <button class="btn-outline" style="margin-top:16px;" onclick="renderServiceSearchStep('budget')">${budget ? 'Try a higher budget' : 'Choose another service'}</button>
             </div>
         `;
         return;
@@ -4029,7 +6562,7 @@ function renderServiceSearchResults() {
     body.innerHTML = `
         <button class="btn-back" onclick="renderServiceSearchStep('budget')">← Back</button>
         <h2 style="margin-bottom:6px;">${selectedSubService}</h2>
-        <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel} · <strong>${results.length} salon${results.length > 1 ? 's' : ''} found</strong></p>
+        <p style="color: var(--text-light); margin-bottom:20px; font-size:0.9rem;">${budgetLabel}${categoryLabel} · <strong>${results.length} venue${results.length > 1 ? 's' : ''} found</strong></p>
         <div class="service-results-list">
             ${results.map(({ merchant, service }) => {
                 const imageContent = merchant.photoUrl
@@ -4201,6 +6734,7 @@ async function loadCustomerHistory() {
         listContainer.innerHTML = '';
         snapshot.forEach(docSnap => {
             const b = docSnap.data();
+            const bookingId = docSnap.id;
             const dateObj = typeof b.bookingDate === 'string' ? new Date(b.bookingDate) : b.bookingDate.toDate();
             
             // Format status colors correctly
@@ -4210,6 +6744,17 @@ async function loadCustomerHistory() {
             if (b.status === 'completed') { bgColor = '#d1fae5'; textColor = '#059669'; }
             if (b.status === 'cancelled' || b.status === 'canceled') { bgColor = '#fee2e2'; textColor = '#dc2626'; }
             if (b.status === 'pending') { bgColor = '#fef3c7'; textColor = '#d97706'; }
+            
+            // Check if already reviewed
+            const existingReview = allReviews.find(r => r.bookingId === bookingId);
+            let reviewBtnHTML = '';
+            if (b.status === 'completed') {
+                if (existingReview) {
+                    reviewBtnHTML = `<span class="btn-reviewed">✓ Reviewed (${existingReview.rating}★)</span>`;
+                } else {
+                    reviewBtnHTML = `<button class="btn-leave-review" onclick="event.stopPropagation(); openReviewModal('${bookingId}', '${b.storeId}', '${(b.storeName || '').replace(/'/g, "\\'")}')">★ Leave a Review</button>`;
+                }
+            }
             
             const card = document.createElement('div');
             card.style.cssText = 'background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 8px;';
@@ -4229,6 +6774,7 @@ async function loadCustomerHistory() {
                         ${dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                     </span>
                 </div>
+                ${reviewBtnHTML ? `<div style="margin-top: 10px; display: flex; justify-content: flex-end;">${reviewBtnHTML}</div>` : ''}
             `;
             listContainer.appendChild(card);
         });
@@ -4237,4 +6783,1412 @@ async function loadCustomerHistory() {
         console.error("Error fetching history:", error);
         listContainer.innerHTML = '<p style="color: red;">Failed to load history.</p>';
     }
+}
+
+
+// ========== RATINGS & REVIEWS SYSTEM ==========
+
+let pendingReview = { bookingId: null, storeId: null, storeName: '', rating: 0 };
+
+window.setReviewRating = function(value) {
+    pendingReview.rating = value;
+    const stars = document.querySelectorAll('#star-picker .star');
+    stars.forEach((star, i) => {
+        star.classList.toggle('active', i < value);
+    });
+    const labels = ['', 'Poor', 'Fair', 'Good', 'Very Good', 'Excellent'];
+    document.getElementById('rating-label').textContent = labels[value] || '';
+};
+
+window.openReviewModal = function(bookingId, storeId, storeName) {
+    pendingReview = { bookingId, storeId, storeName, rating: 0 };
+    
+    // Reset UI
+    document.getElementById('review-store-name').textContent = `How was your visit to ${storeName}?`;
+    document.getElementById('review-comment').value = '';
+    document.getElementById('rating-label').textContent = 'Tap a star to rate';
+    document.querySelectorAll('#star-picker .star').forEach(s => s.classList.remove('active'));
+    
+    document.getElementById('review-modal').style.display = 'flex';
+};
+
+window.submitReview = async function() {
+    if (pendingReview.rating === 0) {
+        showToast('Please select a star rating', 'error');
+        return;
+    }
+    
+    const btn = document.getElementById('btn-submit-review');
+    btn.disabled = true;
+    btn.textContent = 'Submitting...';
+    
+    try {
+        const reviewData = {
+            bookingId: pendingReview.bookingId,
+            storeId: pendingReview.storeId,
+            storeName: pendingReview.storeName,
+            customerId: currentUser.phone,
+            customerName: currentUser.name || 'Anonymous',
+            rating: pendingReview.rating,
+            comment: document.getElementById('review-comment').value.trim(),
+            createdAt: Timestamp.now()
+        };
+        
+        await addDoc(collection(db, 'reviews'), reviewData);
+        
+        // Update local cache
+        allReviews.push(reviewData);
+        
+        // Refresh UI
+        renderMerchants();
+        
+        closeModal('review-modal');
+        showToast('Thank you for your review! ⭐', 'success');
+        
+        // Refresh visit history to show "Reviewed" badge
+        loadCustomerHistory();
+        
+    } catch (error) {
+        console.error('Error submitting review:', error);
+        showToast('Failed to submit review. Please try again.', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Submit Review';
+    }
+};
+
+
+
+// ========== ENHANCED SEARCH ==========
+
+let isSearchActive = false;
+let discoveryMapInstance = null;
+let discoveryMarkers = [];
+let discoveryMapVisible = false;
+
+window.toggleInlineMap = function () {
+    discoveryMapVisible = !discoveryMapVisible;
+    const panel = document.getElementById('discovery-map-panel');
+    const layout = document.getElementById('discovery-layout');
+    const btn = document.getElementById('map-toggle-btn');
+
+    if (discoveryMapVisible) {
+        panel.style.display = 'block';
+        layout.classList.add('map-active');
+        btn.classList.add('active');
+        btn.textContent = '✕ Hide Map';
+        // Initialize map if first time
+        if (!discoveryMapInstance && typeof google !== 'undefined') {
+            discoveryMapInstance = new google.maps.Map(document.getElementById('discovery-map'), {
+                center: { lat: 36.191, lng: 44.009 }, // Erbil default
+                zoom: 13,
+                styles: [
+                    { featureType: "poi", stylers: [{ visibility: "off" }] },
+                    { featureType: "transit", stylers: [{ visibility: "off" }] }
+                ],
+                mapTypeControl: false,
+                streetViewControl: false,
+                fullscreenControl: false
+            });
+        }
+        updateDiscoveryMapMarkers();
+    } else {
+        panel.style.display = 'none';
+        layout.classList.remove('map-active');
+        btn.classList.remove('active');
+        btn.textContent = '🗺️ Map';
+    }
+};
+
+function updateDiscoveryMapMarkers(filteredMerchants) {
+    if (!discoveryMapInstance) return;
+    
+    // Clear existing markers
+    discoveryMarkers.forEach(m => m.setMap(null));
+    discoveryMarkers = [];
+
+    const merchants = filteredMerchants || allMerchants;
+    const bounds = new google.maps.LatLngBounds();
+    let hasValidCoords = false;
+
+    merchants.forEach(merchant => {
+        if (!merchant.lat || !merchant.lng) return;
+        hasValidCoords = true;
+        const pos = { lat: parseFloat(merchant.lat), lng: parseFloat(merchant.lng) };
+        bounds.extend(pos);
+
+        const marker = new google.maps.Marker({
+            position: pos,
+            map: discoveryMapInstance,
+            title: merchant.name,
+            icon: {
+                path: google.maps.SymbolPath.CIRCLE,
+                fillColor: '#C19A6B',
+                fillOpacity: 1,
+                strokeColor: '#fff',
+                strokeWeight: 2,
+                scale: 8
+            }
+        });
+
+        const infoWindow = new google.maps.InfoWindow({
+            content: `<div style="padding:4px 8px;"><strong>${merchant.name}</strong><br><span style="color:#666;font-size:0.85rem;">${merchant.address || ''}</span><br><a href="#" onclick="event.preventDefault(); openMerchantDetails('${merchant.id}')" style="color:#C19A6B; font-weight:500;">View Profile →</a></div>`
+        });
+        marker.addListener('click', () => {
+            discoveryMarkers.forEach(m => m.infoWindow?.close());
+            infoWindow.open(discoveryMapInstance, marker);
+        });
+        marker.infoWindow = infoWindow;
+        marker.merchantId = merchant.id;
+        discoveryMarkers.push(marker);
+    });
+
+    if (hasValidCoords) {
+        discoveryMapInstance.fitBounds(bounds);
+        if (merchants.length === 1) {
+            discoveryMapInstance.setZoom(15);
+        }
+    }
+}
+
+function doesMerchantMatchCategoryFilter(merchant, categoryFilter) {
+    if (!categoryFilter || categoryFilter === 'all') return true;
+
+    const categoryBlob = normalizeTextForSearch([
+        merchant?.category,
+        merchant?.type,
+        ...(Array.isArray(merchant?.services) ? merchant.services.flatMap(service => [service?.category, service?.name]) : [])
+    ].filter(Boolean).join(' '));
+
+    return doesNormalizedSearchTextMatchQuery(categoryBlob, categoryFilter);
+}
+
+function getMerchantSearchRank(merchant, queryText) {
+    const normalizedQuery = normalizeTextForSearch(queryText);
+    if (!normalizedQuery) return 0;
+
+    const merchantName = normalizeTextForSearch(merchant?.name);
+    const merchantCategory = normalizeTextForSearch(merchant?.category);
+    const merchantAddress = normalizeTextForSearch(merchant?.address);
+    const merchantSearchBlob = buildMerchantSearchBlob(merchant);
+    const tokenGroups = getSearchTokens(normalizedQuery).map(getAliasGroupForToken);
+
+    let score = 0;
+    if (merchantName.includes(normalizedQuery)) score += 12;
+    if (merchantCategory.includes(normalizedQuery)) score += 8;
+    if (merchantAddress.includes(normalizedQuery)) score += 4;
+
+    tokenGroups.forEach(group => {
+        if (Array.from(group).some(term => merchantSearchBlob.includes(term))) {
+            score += 2;
+        }
+    });
+
+    return score;
+}
+
+window.performSearch = function() {
+    const treatmentQuery = (document.getElementById('search-treatment')?.value || '').trim().toLowerCase();
+    const categoryFilter = document.getElementById('search-category')?.value || 'all';
+    const sortBy = document.getElementById('search-sort')?.value || 'default';
+    
+    // Check if any filter is active
+    isSearchActive = treatmentQuery !== '' || categoryFilter !== 'all' || sortBy !== 'default';
+    
+    let filtered = [...allMerchants];
+    const searchScores = new Map();
+    
+    // Filter by treatment/category text through merchant, service, staff and offer metadata
+    if (treatmentQuery) {
+        filtered = filtered.filter(m => {
+            const searchBlob = buildMerchantSearchBlob(m);
+            const isMatch = doesNormalizedSearchTextMatchQuery(searchBlob, treatmentQuery);
+            if (isMatch) {
+                searchScores.set(m.id, getMerchantSearchRank(m, treatmentQuery));
+            }
+            return isMatch;
+        });
+    }
+    
+    // Filter by category
+    if (categoryFilter !== 'all') {
+        filtered = filtered.filter(m => doesMerchantMatchCategoryFilter(m, categoryFilter));
+    }
+    
+    // Also apply the current type filter (All / Salons / Beauty Centers chips)
+    if (currentFilter !== 'all') {
+        filtered = filtered.filter(m => m.type === currentFilter);
+    }
+    
+    // Sort
+    if (sortBy === 'rating') {
+        filtered.sort((a, b) => {
+            const rA = getStoreRating(a.id);
+            const rB = getStoreRating(b.id);
+            return parseFloat(rB.avg) - parseFloat(rA.avg);
+        });
+    } else if (sortBy === 'reviews') {
+        filtered.sort((a, b) => {
+            const rA = getStoreRating(a.id);
+            const rB = getStoreRating(b.id);
+            return rB.count - rA.count;
+        });
+    } else if (sortBy === 'nearest') {
+        filtered.sort((a, b) => {
+            const distA = parseFloat(a.distance) || 999;
+            const distB = parseFloat(b.distance) || 999;
+            return distA - distB;
+        });
+    } else if (treatmentQuery) {
+        filtered.sort((a, b) => {
+            const scoreA = searchScores.get(a.id) || 0;
+            const scoreB = searchScores.get(b.id) || 0;
+            if (scoreB !== scoreA) return scoreB - scoreA;
+
+            const ratingA = getStoreRating(a.id);
+            const ratingB = getStoreRating(b.id);
+            if (ratingB.count !== ratingA.count) return ratingB.count - ratingA.count;
+            return String(a.name || '').localeCompare(String(b.name || ''));
+        });
+    }
+    
+    // Show search results info
+    const infoBar = document.getElementById('search-results-info');
+    const countEl = document.getElementById('search-results-count');
+    
+    if (isSearchActive) {
+        infoBar.style.display = 'flex';
+        let label = `${filtered.length} venue${filtered.length !== 1 ? 's' : ''} found`;
+        if (treatmentQuery) label += ` for "${treatmentQuery}"`;
+        if (categoryFilter !== 'all') label += ` in ${categoryFilter}`;
+        countEl.textContent = label;
+        // Show map toggle button
+        const mapToggleBtn = document.getElementById('map-toggle-btn');
+        if (mapToggleBtn) mapToggleBtn.style.display = 'inline-block';
+    } else {
+        infoBar.style.display = 'none';
+        // Hide map toggle and collapse map when clearing search
+        const mapToggleBtn = document.getElementById('map-toggle-btn');
+        if (mapToggleBtn) mapToggleBtn.style.display = 'none';
+        if (discoveryMapVisible) {
+            discoveryMapVisible = false;
+            const panel = document.getElementById('discovery-map-panel');
+            const layout = document.getElementById('discovery-layout');
+            if (panel) panel.style.display = 'none';
+            if (layout) layout.classList.remove('map-active');
+        }
+    }
+    
+    // Update map markers if map is visible
+    if (discoveryMapVisible) {
+        updateDiscoveryMapMarkers(filtered);
+    }
+    
+    // Render filtered results
+    if (filtered.length === 0) {
+        if (merchantsGrid) merchantsGrid.innerHTML = '<div class="empty-state">No venues match your search. Try different keywords.</div>';
+        return;
+    }
+    
+    if (merchantsGrid) merchantsGrid.innerHTML = filtered.map(merchant => {
+        const imageContent = merchant.photoUrl
+            ? `<img src="${merchant.photoUrl}" alt="${merchant.name}" onerror="this.outerHTML='<span class=\\'emoji-fallback\\'>${merchant.image || ''}</span>'">`
+            : `<span class="emoji-fallback">${merchant.image || ''}</span>`;
+        
+        const now = new Date();
+        const merchantOffers = getActiveMerchantOffers(merchant.id, now);
+        const hasDiscount = merchantOffers.length > 0;
+        const maxDiscount = hasDiscount ? Math.max(...merchantOffers.map(o => o.discountPercent)) : 0;
+        
+        const rating = getStoreRating(merchant.id);
+        const ratingHTML = rating.count > 0
+            ? `<div class="card-rating">
+                    <span class="stars">${generateStarHTML(parseFloat(rating.avg))}</span>
+                    <span class="rating-score">${rating.avg}</span>
+                    <span class="rating-count">(${rating.count})</span>
+               </div>`
+            : `<div class="card-rating"><span class="rating-count" style="color:#9ca3af;">No reviews yet</span></div>`;
+        
+        return `
+        <div class="merchant-card" onclick="openMerchantDetails('${merchant.id}')">
+            <div class="card-img-top">
+                ${imageContent}
+                ${hasDiscount ? `<div class="discount-badge"> Up to ${maxDiscount}% OFF</div>` : ''}
+            </div>
+            <div class="card-body">
+                <span class="card-tag">${merchant.category}</span>
+                <h3 class="card-title">${merchant.name}</h3>
+                ${ratingHTML}
+                <div class="card-meta">
+                    <span>${merchant.distance}</span>
+                </div>
+                <p style="color: #6b7280; font-size: 0.9rem;">${merchant.address}</p>
+                ${merchant.lat && merchant.lng ? `<span class="btn-map-link" onclick="event.stopPropagation(); showOnMap('${merchant.id}')"> View on Map</span>` : ''}
+            </div>
+        </div>
+    `}).join('');
+};
+
+window.clearSearch = function() {
+    document.getElementById('search-treatment').value = '';
+    document.getElementById('search-category').value = 'all';
+    document.getElementById('search-sort').value = 'default';
+    document.getElementById('search-results-info').style.display = 'none';
+    isSearchActive = false;
+    
+    // Collapse discovery map
+    discoveryMapVisible = false;
+    const panel = document.getElementById('discovery-map-panel');
+    const layout = document.getElementById('discovery-layout');
+    const btn = document.getElementById('map-toggle-btn');
+    if (panel) panel.style.display = 'none';
+    if (layout) layout.classList.remove('map-active');
+    if (btn) { btn.style.display = 'none'; btn.classList.remove('active'); btn.textContent = '🗺️ Map'; }
+    
+    renderMerchants();
+};
+
+
+// ========== VENUE PROFILE PAGE ==========
+
+let currentVenueProfileMerchantId = null;
+const venueProfileState = {
+    activeTabByMerchant: {},
+    cartByMerchant: {}
+};
+
+function renderVenueProfileMiniMap(merchant) {
+    const mapContainer = document.getElementById('venue-profile-mini-map');
+    if (!mapContainer) return;
+
+    const coords = getMerchantCoordinates(merchant);
+    if (!coords) {
+        mapContainer.innerHTML = '<div class="venue-mini-map-fallback">Location coordinates are not available for this store yet.</div>';
+        return;
+    }
+
+    if (!window.google?.maps) {
+        mapContainer.innerHTML = '<div class="venue-mini-map-fallback">Map is still loading. Use the directions button to open the store location.</div>';
+        return;
+    }
+
+    venueProfileMap = new google.maps.Map(mapContainer, {
+        center: coords,
+        zoom: 15,
+        disableDefaultUI: true,
+        gestureHandling: 'cooperative',
+        clickableIcons: false,
+        styles: [
+            {
+                featureType: 'poi.business',
+                stylers: [{ visibility: 'off' }]
+            }
+        ]
+    });
+
+    venueProfileMapMarker = new google.maps.Marker({
+        position: coords,
+        map: venueProfileMap,
+        title: merchant.name
+    });
+}
+
+function getVenueCartItems(merchantId) {
+    if (!venueProfileState.cartByMerchant[merchantId]) {
+        venueProfileState.cartByMerchant[merchantId] = [];
+    }
+    return venueProfileState.cartByMerchant[merchantId];
+}
+
+function syncVenueCartWithProducts(merchantId, products) {
+    const productList = Array.isArray(products) ? products : [];
+    const cartItems = getVenueCartItems(merchantId);
+
+    const synced = cartItems
+        .filter(item => productList[item.productIndex])
+        .map(item => {
+            const stock = Math.max(0, Number(productList[item.productIndex].stock) || 0);
+            const quantity = stock > 0 ? Math.max(1, Math.min(item.quantity, stock)) : 0;
+            return { ...item, quantity };
+        })
+        .filter(item => item.quantity > 0);
+
+    venueProfileState.cartByMerchant[merchantId] = synced;
+    return synced;
+}
+
+function calculateVenueCartTotals(cartItems, products) {
+    const productList = Array.isArray(products) ? products : [];
+    return cartItems.reduce((acc, item) => {
+        const product = productList[item.productIndex];
+        if (!product) return acc;
+        const price = Math.max(0, Number(product.price) || 0);
+        const quantity = Math.max(1, Number(item.quantity) || 1);
+        acc.totalItems += quantity;
+        acc.subtotal += price * quantity;
+        return acc;
+    }, { totalItems: 0, subtotal: 0 });
+}
+
+function getVenueGalleryImages(merchant) {
+    const galleryImages = Array.isArray(merchant?.gallery)
+        ? merchant.gallery.filter(url => typeof url === 'string' && url.trim())
+        : [];
+    const primaryImage = typeof merchant?.photoUrl === 'string' && merchant.photoUrl.trim()
+        ? [merchant.photoUrl]
+        : [];
+
+    return [...new Set([...primaryImage, ...galleryImages])].slice(0, 5);
+}
+
+function getVenueTeamMembers(merchant) {
+    return getNormalizedMerchantStaff(merchant, { includeInactive: false, allowLegacyFallback: true });
+}
+
+function getVenueInitials(name = '') {
+    const parts = String(name)
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2);
+
+    if (parts.length === 0) return 'HV';
+    return parts.map(part => part[0].toUpperCase()).join('');
+}
+
+function getVenueSectionId(sectionName) {
+    return `venue-section-${sectionName}`;
+}
+
+function scrollVenueProfileSection(sectionName, behavior = 'smooth') {
+    const section = document.getElementById(getVenueSectionId(sectionName));
+    if (!section) return;
+    section.scrollIntoView({ behavior, block: 'start' });
+}
+
+window.openMerchantDetails = function (id, preselectedServiceJson = null) {
+    const merchant = allMerchants.find(m => m.id === id);
+    if (!merchant) return;
+
+    // If a service was pre-selected (from search), go directly to booking
+    if (preselectedServiceJson) {
+        openBookingFromProfile(id, preselectedServiceJson);
+        return;
+    }
+
+    if (!venueProfileState.activeTabByMerchant[id]) {
+        venueProfileState.activeTabByMerchant[id] = 'services';
+    }
+    getVenueCartItems(id);
+
+    // Otherwise, show the venue profile page
+    renderVenueProfile(merchant);
+};
+
+window.switchVenueTab = function (tabName) {
+    if (!currentVenueProfileMerchantId) return;
+    const merchant = allMerchants.find(m => m.id === currentVenueProfileMerchantId);
+    if (!merchant) return;
+    venueProfileState.activeTabByMerchant[currentVenueProfileMerchantId] = tabName;
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: tabName });
+};
+
+window.addProductToCart = function (merchantId, productIndex) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    const products = merchant?.products || [];
+    const product = products[productIndex];
+    if (!merchant || !product) return;
+
+    const stock = Math.max(0, Number(product.stock) || 0);
+    if (stock <= 0) {
+        showToast('This product is out of stock.', 'error');
+        return;
+    }
+
+    const cartItems = getVenueCartItems(merchantId);
+    const existing = cartItems.find(item => item.productIndex === productIndex);
+    if (existing) {
+        if (existing.quantity >= stock) {
+            showToast(`Only ${stock} left in stock.`, 'error');
+            return;
+        }
+        existing.quantity += 1;
+    } else {
+        cartItems.push({ productIndex, quantity: 1 });
+    }
+
+    venueProfileState.activeTabByMerchant[merchantId] = 'shop';
+    showToast('Product added to cart.', 'success');
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: 'shop' });
+};
+
+window.changeShopCartQuantity = function (merchantId, productIndex, delta) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    const products = merchant?.products || [];
+    const product = products[productIndex];
+    if (!merchant || !product) return;
+
+    const cartItems = getVenueCartItems(merchantId);
+    const item = cartItems.find(entry => entry.productIndex === productIndex);
+    if (!item) return;
+
+    const stock = Math.max(0, Number(product.stock) || 0);
+    if (delta > 0 && item.quantity >= stock) {
+        showToast(`Only ${stock} left in stock.`, 'error');
+        return;
+    }
+
+    item.quantity += delta;
+    if (item.quantity <= 0) {
+        venueProfileState.cartByMerchant[merchantId] = cartItems.filter(entry => entry.productIndex !== productIndex);
+    }
+
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: 'shop' });
+};
+
+window.removeFromShopCart = function (merchantId, productIndex) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+    const cartItems = getVenueCartItems(merchantId);
+    venueProfileState.cartByMerchant[merchantId] = cartItems.filter(entry => entry.productIndex !== productIndex);
+    renderVenueProfile(merchant, { preserveScroll: true, focusSection: 'shop' });
+};
+
+window.checkoutShopCart = async function (merchantId) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+
+    if (!currentUser) {
+        showToast("Please login first.", 'error');
+        authModal.style.display = 'flex';
+        return;
+    }
+
+    const products = merchant.products || [];
+    const cartItems = syncVenueCartWithProducts(merchantId, products);
+    if (!cartItems.length) {
+        showToast('Your cart is empty.', 'error');
+        return;
+    }
+
+    const orderItems = [];
+    for (const item of cartItems) {
+        const product = products[item.productIndex];
+        if (!product) continue;
+        const stock = Math.max(0, Number(product.stock) || 0);
+        if (item.quantity > stock) {
+            showToast(`${product.name}: only ${stock} left in stock.`, 'error');
+            return;
+        }
+
+        const unitPrice = Math.max(0, Number(product.price) || 0);
+        const quantity = Math.max(1, Number(item.quantity) || 1);
+        orderItems.push({
+            productIndex: item.productIndex,
+            name: product.name || 'Product',
+            image: product.image || '',
+            unitPrice,
+            quantity,
+            lineTotal: unitPrice * quantity
+        });
+    }
+
+    if (orderItems.length === 0) {
+        showToast('Your cart is empty.', 'error');
+        return;
+    }
+
+    const totalItems = orderItems.reduce((sum, item) => sum + item.quantity, 0);
+    const subtotal = orderItems.reduce((sum, item) => sum + item.lineTotal, 0);
+
+    if (!await showConfirm(`Confirm order for ${subtotal.toLocaleString()} IQD?`)) return;
+
+    try {
+        const merchantRef = doc(db, "merchants", merchantId);
+        const orderRef = doc(collection(db, 'orders'));
+
+        const transactionResult = await runTransaction(db, async (transaction) => {
+            const merchantSnap = await transaction.get(merchantRef);
+            if (!merchantSnap.exists()) {
+                throw new Error('Store not found.');
+            }
+
+            const latestMerchant = merchantSnap.data();
+            const latestProducts = Array.isArray(latestMerchant.products) ? [...latestMerchant.products] : [];
+            const orderPayload = [];
+
+            for (const item of cartItems) {
+                const product = latestProducts[item.productIndex];
+                if (!product) {
+                    throw new Error('One of the selected products is no longer available.');
+                }
+
+                const stock = Math.max(0, Number(product.stock) || 0);
+                const quantity = Math.max(1, Number(item.quantity) || 1);
+                if (quantity > stock) {
+                    throw new Error(`${product.name}: only ${stock} left in stock.`);
+                }
+
+                const unitPrice = Math.max(0, Number(product.price) || 0);
+                latestProducts[item.productIndex] = {
+                    ...product,
+                    stock: Math.max(0, stock - quantity)
+                };
+
+                orderPayload.push({
+                    name: product.name || 'Product',
+                    image: product.image || '',
+                    price: unitPrice,
+                    quantity,
+                    total: unitPrice * quantity
+                });
+            }
+
+            const transactionTotalItems = orderPayload.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+            const transactionSubtotal = orderPayload.reduce((sum, item) => sum + (Number(item.total) || 0), 0);
+
+            transaction.set(orderRef, {
+                userId: currentUser.id || currentUser.phone,
+                customerName: currentUser.name || 'Customer',
+                customerPhone: currentUser.phone || '',
+                storeId: merchant.id,
+                merchantId: merchant.id,
+                storeName: merchant.name,
+                items: orderPayload,
+                totalItems: transactionTotalItems,
+                subtotal: transactionSubtotal,
+                status: 'pending',
+                createdAt: Timestamp.now()
+            });
+            transaction.update(merchantRef, { products: latestProducts });
+
+            return {
+                updatedProducts: latestProducts,
+                totalItems: transactionTotalItems,
+                subtotal: transactionSubtotal
+            };
+        });
+        const updatedProducts = transactionResult.updatedProducts;
+
+        const merchantIndex = allMerchants.findIndex(m => m.id === merchantId);
+        if (merchantIndex >= 0) {
+            allMerchants[merchantIndex] = { ...allMerchants[merchantIndex], products: updatedProducts };
+        }
+
+        venueProfileState.cartByMerchant[merchantId] = [];
+        showToast('Order placed successfully!', 'success');
+        renderVenueProfile(allMerchants.find(m => m.id === merchantId) || merchant, { preserveScroll: true, focusSection: 'shop' });
+    } catch (error) {
+        console.error('Checkout error:', error);
+        showToast(error?.message || 'Failed to place order. Please try again.', 'error');
+    }
+};
+
+function renderVenueProfile(merchant, options = {}) {
+    currentVenueProfileMerchantId = merchant.id;
+    const container = document.getElementById('venue-profile-content');
+    if (!container) return;
+
+    const rating = getStoreRating(merchant.id);
+    const now = new Date();
+    const activeTab = venueProfileState.activeTabByMerchant[merchant.id] || 'services';
+    const merchantOffers = getActiveMerchantOffers(merchant.id, now);
+    const storeReviews = allReviews.filter(r => r.storeId === merchant.id)
+        .sort((a, b) => {
+            const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
+            const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
+            return dateB - dateA;
+        });
+
+    const services = merchant.services || [];
+    const products = Array.isArray(merchant.products) ? merchant.products : [];
+    const cartItems = syncVenueCartWithProducts(merchant.id, products);
+    const cartTotals = calculateVenueCartTotals(cartItems, products);
+    const images = getVenueGalleryImages(merchant);
+    const teamMembers = getVenueTeamMembers(merchant);
+    const teamCount = getEffectiveWorkerCapacity(merchant);
+    const canPreselectStaff = getBookableStaffOptions(merchant).length > 0;
+    const aboutText = String(merchant.description || merchant.about || merchant.bio || '').trim();
+    const aboutFallback = `${merchant.name} is available for online booking on Hewrina. Browse services, review the team, and use the location section for directions before you book.`;
+
+    const merchantCoords = getMerchantCoordinates(merchant);
+    const directionsUrl = merchantCoords
+        ? `https://www.google.com/maps/search/?api=1&query=${merchantCoords.lat},${merchantCoords.lng}`
+        : '#';
+
+    const ratingHTML = rating.count > 0
+        ? `<div class="venue-hero-rating">
+                <span class="stars">${generateStarHTML(parseFloat(rating.avg))}</span>
+                <span class="score">${rating.avg}</span>
+                <span class="count">${rating.count.toLocaleString()} review${rating.count > 1 ? 's' : ''}</span>
+           </div>`
+        : `<div class="venue-hero-rating"><span class="count" style="color:#9ca3af;">New venue on Hewrina</span></div>`;
+
+    let galleryHTML = '';
+    if (images.length > 0) {
+        const secondaryTiles = Array.from({ length: 4 }, (_, idx) => {
+            const imageUrl = images[idx + 1];
+            if (imageUrl) {
+                return `
+                    <div class="venue-gallery-tile">
+                        <img src="${imageUrl}" alt="${merchant.name}" onerror="this.closest('.venue-gallery-tile').classList.add('is-hidden')">
+                    </div>
+                `;
+            }
+
+            const fallbackLabel = idx === 0
+                ? (merchant.category || 'Venue')
+                : idx === 1
+                    ? (merchant.address || 'Profile details')
+                    : idx === 2
+                        ? `${services.length} service${services.length === 1 ? '' : 's'}`
+                        : `${teamCount || 1} specialist${(teamCount || 1) === 1 ? '' : 's'}`;
+
+            return `
+                <div class="venue-gallery-tile venue-gallery-placeholder">
+                    <span>${fallbackLabel}</span>
+                </div>
+            `;
+        }).join('');
+
+        galleryHTML = `
+            <div id="${getVenueSectionId('photos')}" class="venue-gallery-mosaic ${images.length === 1 ? 'single-photo' : ''}">
+                <div class="venue-gallery-tile venue-gallery-main">
+                    <img src="${images[0]}" alt="${merchant.name}" onerror="this.closest('.venue-gallery-main').innerHTML='<div class=&quot;venue-gallery-placeholder main&quot;><span>${merchant.name}</span></div>'">
+                    <div class="venue-gallery-caption">
+                        <strong>${merchant.name}</strong>
+                        <span>${merchant.category || 'Venue profile'}</span>
+                    </div>
+                </div>
+                ${secondaryTiles}
+                <div class="venue-gallery-count">${images.length} photo${images.length === 1 ? '' : 's'}</div>
+            </div>
+        `;
+    } else {
+        galleryHTML = `
+            <div id="${getVenueSectionId('photos')}" class="venue-gallery-mosaic no-photos">
+                <div class="venue-gallery-tile venue-gallery-main venue-gallery-placeholder main">
+                    <div class="venue-gallery-caption">
+                        <strong>${merchant.name}</strong>
+                        <span>${merchant.category || 'Photo gallery coming soon'}</span>
+                    </div>
+                </div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${merchant.category || 'Venue'}</span></div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${merchant.address || 'Address coming soon'}</span></div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${services.length} services</span></div>
+                <div class="venue-gallery-tile venue-gallery-placeholder"><span>${teamCount || 1} specialist${(teamCount || 1) === 1 ? '' : 's'}</span></div>
+            </div>
+        `;
+    }
+
+    let servicesHTML = '';
+    if (services.length > 0) {
+        const categorized = {};
+        services.forEach(service => {
+            const cat = service.category || 'Featured Services';
+            if (!categorized[cat]) categorized[cat] = [];
+            categorized[cat].push(service);
+        });
+
+        for (const [catName, catServices] of Object.entries(categorized)) {
+            servicesHTML += `
+                <div class="venue-service-group">
+                    <div class="venue-service-group-head">
+                        <div>
+                            <h3 class="venue-service-category-title">${catName}</h3>
+                            <p>${catServices.length} service${catServices.length === 1 ? '' : 's'}</p>
+                        </div>
+                    </div>
+                    <div class="venue-service-list">
+                        ${catServices.map(service => {
+                            const basePrice = Number(service.price) || 0;
+                            const serviceOffers = merchantOffers.filter(offer => offer.serviceName === service.name);
+                            const allDayOffers = serviceOffers.filter(offer => !isOfferTimeRestricted(offer));
+                            const timedOffers = serviceOffers.filter(offer => isOfferTimeRestricted(offer));
+
+                            const bestAllDayOffer = allDayOffers.reduce((best, current) => {
+                                const bestDiscount = Number(best?.discountPercent || 0);
+                                const currentDiscount = Number(current?.discountPercent || 0);
+                                return currentDiscount > bestDiscount ? current : best;
+                            }, null);
+                            const bestTimedOffer = timedOffers.reduce((best, current) => {
+                                const bestDiscount = Number(best?.discountPercent || 0);
+                                const currentDiscount = Number(current?.discountPercent || 0);
+                                return currentDiscount > bestDiscount ? current : best;
+                            }, null);
+
+                            const hasAllDayOffer = !!bestAllDayOffer;
+                            const discountedPrice = hasAllDayOffer
+                                ? Math.round(basePrice * (1 - ((Number(bestAllDayOffer.discountPercent) || 0) / 100)))
+                                : basePrice;
+                            const priceDisplay = hasAllDayOffer
+                                ? `<span class="price-original">${basePrice.toLocaleString()} IQD</span><span class="price">${discountedPrice.toLocaleString()} IQD</span>`
+                                : `<span class="price">${basePrice.toLocaleString()} IQD</span>`;
+
+                            const tagHTML = hasAllDayOffer
+                                ? `<span class="venue-service-tag">-${bestAllDayOffer.discountPercent}%</span>`
+                                : bestTimedOffer
+                                    ? `<span class="venue-service-tag off-peak">-${bestTimedOffer.discountPercent}% Off-peak</span>`
+                                    : '';
+
+                            const offPeakHint = !hasAllDayOffer && bestTimedOffer
+                                ? `<span class="service-detail off-peak">Valid ${formatOfferHours(bestTimedOffer)}</span>`
+                                : '';
+
+                            const serviceJson = encodeURIComponent(JSON.stringify({
+                                name: service.name,
+                                price: basePrice,
+                                duration: service.duration
+                            }));
+
+                            return `
+                                <div class="venue-service-card">
+                                    <div class="venue-service-info">
+                                        <h4>${service.name}</h4>
+                                        <div class="venue-service-meta-line">
+                                            <span class="service-detail">${service.duration} min</span>
+                                            ${tagHTML}
+                                        </div>
+                                        ${offPeakHint}
+                                    </div>
+                                    <div class="venue-service-price">
+                                        ${priceDisplay}
+                                        <button class="btn-book-service" onclick="event.stopPropagation(); openBookingFromProfile('${merchant.id}', '${serviceJson}')">Book</button>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }
+    } else {
+        servicesHTML = '<div class="venue-no-reviews">No services listed yet.</div>';
+    }
+
+    const productCardsHTML = products.length > 0
+        ? products.map((product, index) => {
+            const price = Math.max(0, Number(product.price) || 0);
+            const stock = Math.max(0, Number(product.stock) || 0);
+            const outOfStock = stock <= 0;
+            const image = product.image || '';
+            const cartItem = cartItems.find(item => item.productIndex === index);
+            const inCartQty = cartItem ? cartItem.quantity : 0;
+
+            return `
+                <div class="shop-product-card ${outOfStock ? 'out-of-stock' : ''}">
+                    <div class="shop-product-image-wrap">
+                        ${image
+                            ? `<img class="shop-product-image" src="${image}" alt="${product.name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">`
+                            : ''
+                        }
+                        <div class="shop-product-fallback" style="${image ? 'display:none;' : 'display:flex;'}">Product</div>
+                    </div>
+                    <div class="shop-product-body">
+                        <h4>${product.name || 'Product'}</h4>
+                        <p class="shop-product-price">${price.toLocaleString()} IQD</p>
+                        <div class="shop-product-stock ${outOfStock ? 'empty' : ''}">
+                            ${outOfStock ? 'Out of stock' : `${stock} in stock`}
+                        </div>
+                        <button class="btn-book-service shop-add-btn" ${outOfStock ? 'disabled' : ''} onclick="addProductToCart('${merchant.id}', ${index})">
+                            ${outOfStock ? 'Unavailable' : inCartQty > 0 ? `Add More (${inCartQty} in cart)` : 'Add to Cart'}
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('')
+        : '<div class="venue-no-reviews">No products available in this shop yet.</div>';
+
+    const cartListHTML = cartItems.length > 0
+        ? cartItems.map(item => {
+            const product = products[item.productIndex];
+            if (!product) return '';
+            const unitPrice = Math.max(0, Number(product.price) || 0);
+            const lineTotal = unitPrice * item.quantity;
+            const stock = Math.max(0, Number(product.stock) || 0);
+
+            return `
+                <div class="shop-cart-item">
+                    <div class="shop-cart-item-main">
+                        <div class="shop-cart-item-name">${product.name}</div>
+                        <div class="shop-cart-item-meta">${unitPrice.toLocaleString()} IQD each • ${stock} left</div>
+                    </div>
+                    <div class="shop-cart-item-actions">
+                        <button class="shop-qty-btn" onclick="changeShopCartQuantity('${merchant.id}', ${item.productIndex}, -1)">−</button>
+                        <span class="shop-qty-value">${item.quantity}</span>
+                        <button class="shop-qty-btn" onclick="changeShopCartQuantity('${merchant.id}', ${item.productIndex}, 1)" ${item.quantity >= stock ? 'disabled' : ''}>+</button>
+                        <button class="shop-remove-btn" onclick="removeFromShopCart('${merchant.id}', ${item.productIndex})">Remove</button>
+                    </div>
+                    <div class="shop-cart-item-total">${lineTotal.toLocaleString()} IQD</div>
+                </div>
+            `;
+        }).join('')
+        : '<div class="shop-cart-empty">Your cart is empty.</div>';
+
+    let reviewsHTML = '';
+    if (storeReviews.length > 0) {
+        reviewsHTML = storeReviews.slice(0, 6).map(review => {
+            const date = review.createdAt?.toDate ? review.createdAt.toDate() : new Date(review.createdAt);
+            const reviewerName = review.customerName || 'Anonymous';
+            return `
+                <div class="venue-review-card">
+                    <div class="review-card-header">
+                        <div class="venue-reviewer">
+                            <span class="venue-reviewer-avatar">${getVenueInitials(reviewerName)}</span>
+                            <span class="reviewer-name">${reviewerName}</span>
+                        </div>
+                        <span class="review-date">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                    </div>
+                    <div class="review-stars">${generateStarHTML(review.rating)}</div>
+                    ${review.comment ? `<p class="review-text">${review.comment}</p>` : ''}
+                </div>
+            `;
+        }).join('');
+    } else {
+        reviewsHTML = '<div class="venue-no-reviews">No reviews yet. Be the first to rate this venue!</div>';
+    }
+
+    const reviewIntro = rating.count > 0
+        ? `<div class="venue-review-summary-card">
+                <div class="venue-review-score">${rating.avg}</div>
+                <div>
+                    <div class="review-stars">${generateStarHTML(parseFloat(rating.avg))}</div>
+                    <p>Based on ${rating.count.toLocaleString()} review${rating.count > 1 ? 's' : ''}</p>
+                </div>
+           </div>`
+        : `<div class="venue-review-summary-card empty"><p>No ratings yet. The first completed visits will appear here.</p></div>`;
+
+    const teamHTML = teamMembers.length > 0 ? `
+        <div id="${getVenueSectionId('team')}" class="venue-section venue-surface-card">
+            <div class="venue-section-heading">
+                <div>
+                    <span class="venue-section-kicker">Team</span>
+                    <h2>Choose your specialist</h2>
+                </div>
+                <button class="venue-inline-link" onclick="openBookingFromProfile('${merchant.id}')">Book any available</button>
+            </div>
+            <div class="venue-team-grid">
+                ${teamMembers.map(member => {
+                    const avatar = member.image
+                        ? `<img src="${member.image}" alt="${member.name}" onerror="this.closest('.venue-team-avatar').innerHTML='<span>${getVenueInitials(member.name)}</span>'">`
+                        : `<span>${getVenueInitials(member.name)}</span>`;
+                    const cta = canPreselectStaff && member.id !== 'solo-worker'
+                        ? `openBookingForStaff('${merchant.id}', '${member.id}')`
+                        : `openBookingFromProfile('${merchant.id}')`;
+                    return `
+                        <div class="venue-team-card">
+                            <div class="venue-team-avatar">${avatar}</div>
+                            <div class="venue-team-content">
+                                <h3>${member.name}</h3>
+                                <p>${member.role || 'Team Member'}</p>
+                            </div>
+                            <button class="btn-outline" onclick="${cta}">Book with ${member.name.split(' ')[0]}</button>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        </div>
+    ` : '';
+
+    const aboutFacts = [
+        merchant.category || null,
+        services.length ? `${services.length} bookable service${services.length === 1 ? '' : 's'}` : null,
+        teamCount ? `${teamCount} specialist${teamCount === 1 ? '' : 's'}` : null,
+        products.length ? `${products.length} retail product${products.length === 1 ? '' : 's'}` : null,
+        merchantCoords ? 'Interactive map and directions' : null,
+        merchant.cancellationPolicy ? 'Cancellation policy shown before confirmation' : null
+    ].filter(Boolean);
+
+    const locationSectionHTML = merchantCoords ? `
+        <div id="${getVenueSectionId('location')}" class="venue-section venue-surface-card venue-location-section">
+            <div class="venue-section-heading">
+                <div>
+                    <span class="venue-section-kicker">Location</span>
+                    <h2>Visit the store</h2>
+                </div>
+            </div>
+            <div class="venue-location-grid">
+                <div class="venue-location-copy">
+                    <div class="venue-location-address">${merchant.address || 'Address not provided yet.'}</div>
+                    <div class="venue-location-coords">Lat ${merchantCoords.lat.toFixed(6)} • Lng ${merchantCoords.lng.toFixed(6)}</div>
+                    <div class="venue-location-actions">
+                        <button class="btn-primary" onclick="showOnMap('${merchant.id}')">Open Interactive Map</button>
+                        <a class="btn-outline" href="${directionsUrl}" target="_blank" rel="noopener noreferrer">Directions</a>
+                    </div>
+                </div>
+                <div id="venue-profile-mini-map" class="venue-profile-mini-map"></div>
+            </div>
+        </div>
+    ` : `
+        <div id="${getVenueSectionId('location')}" class="venue-section venue-surface-card venue-location-section">
+            <div class="venue-section-heading">
+                <div>
+                    <span class="venue-section-kicker">Location</span>
+                    <h2>Visit the store</h2>
+                </div>
+            </div>
+            <div class="venue-mini-map-fallback">This store has not added a map location yet.</div>
+        </div>
+    `;
+
+    const sectionButtons = [
+        { key: 'services', label: `Services (${services.length})` },
+        ...(teamMembers.length > 0 ? [{ key: 'team', label: `Team (${teamMembers.length})` }] : []),
+        ...(products.length > 0 ? [{ key: 'shop', label: `Shop (${products.length})` }] : []),
+        { key: 'reviews', label: `Reviews (${storeReviews.length})` },
+        { key: 'about', label: 'About' },
+        { key: 'location', label: 'Location' }
+    ];
+
+    container.innerHTML = `
+        <button class="venue-back-btn" onclick="closeVenueProfile()">← Back to all venues</button>
+
+        <div class="venue-profile-shell">
+            ${galleryHTML}
+
+            <div class="venue-summary-card">
+                <div class="venue-summary-main">
+                    <div class="venue-summary-chips">
+                        <span class="venue-summary-chip primary">${merchant.category || 'Venue'}</span>
+                        ${merchant.distance ? `<span class="venue-summary-chip">${merchant.distance}</span>` : ''}
+                        ${services.length ? `<span class="venue-summary-chip">${services.length} service${services.length === 1 ? '' : 's'}</span>` : ''}
+                        ${teamCount ? `<span class="venue-summary-chip">${teamCount} specialist${teamCount === 1 ? '' : 's'}</span>` : ''}
+                    </div>
+                    <h1>${merchant.name}</h1>
+                    ${ratingHTML}
+                    <div class="venue-meta-row">
+                        ${merchant.address ? `<span>📍 ${merchant.address}</span>` : ''}
+                        ${merchantCoords ? `<span class="btn-map-link" onclick="showOnMap('${merchant.id}')">View on Map</span>` : ''}
+                    </div>
+                    <p class="venue-summary-copy">${aboutText || aboutFallback}</p>
+                </div>
+
+                <div class="venue-summary-side">
+                    <div class="venue-booking-card">
+                        <div class="venue-booking-card-head">
+                            <span>Book online</span>
+                            <strong>${merchant.name}</strong>
+                        </div>
+                        <div class="venue-booking-stats">
+                            <div><strong>${services.length || 0}</strong><span>Services</span></div>
+                            <div><strong>${teamCount || 1}</strong><span>${(teamCount || 1) === 1 ? 'Specialist' : 'Specialists'}</span></div>
+                            <div><strong>${rating.count > 0 ? rating.avg : 'New'}</strong><span>Rating</span></div>
+                        </div>
+                        <button class="btn-primary full-width" onclick="openBookingFromProfile('${merchant.id}')">Book now</button>
+                        ${merchantCoords ? `<a class="btn-outline full-width venue-directions-btn" href="${directionsUrl}" target="_blank" rel="noopener noreferrer">Get directions</a>` : ''}
+                        ${merchant.cancellationPolicy ? `<p class="venue-booking-note">${merchant.cancellationPolicy}</p>` : `<p class="venue-booking-note">Choose a service, pick a worker when available, and confirm your appointment in a few steps.</p>`}
+                    </div>
+                </div>
+            </div>
+
+            <div class="venue-profile-tabs">
+                ${sectionButtons.map(section => `
+                    <button class="venue-profile-tab ${activeTab === section.key ? 'active' : ''}" onclick="switchVenueTab('${section.key}')">${section.label}</button>
+                `).join('')}
+            </div>
+
+            <div id="${getVenueSectionId('services')}" class="venue-section venue-surface-card">
+                <div class="venue-section-heading">
+                    <div>
+                        <span class="venue-section-kicker">Services</span>
+                        <h2>Book a treatment</h2>
+                    </div>
+                </div>
+                ${servicesHTML}
+            </div>
+
+            ${teamHTML}
+
+            ${products.length > 0 ? `
+                <div id="${getVenueSectionId('shop')}" class="venue-section venue-surface-card">
+                    <div class="venue-section-heading">
+                        <div>
+                            <span class="venue-section-kicker">Shop</span>
+                            <h2>Retail products</h2>
+                        </div>
+                    </div>
+                    <div class="venue-shop-layout">
+                        <div class="venue-shop-grid">
+                            ${productCardsHTML}
+                        </div>
+                        <div class="venue-shop-cart">
+                            <h3>Cart (${cartTotals.totalItems})</h3>
+                            <div class="shop-cart-list">${cartListHTML}</div>
+                            <div class="shop-cart-summary">
+                                <div><span>Subtotal</span><strong>${cartTotals.subtotal.toLocaleString()} IQD</strong></div>
+                            </div>
+                            <button class="btn-primary full-width" onclick="checkoutShopCart('${merchant.id}')" ${cartItems.length === 0 ? 'disabled' : ''}>
+                                Checkout
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ` : ''}
+
+            <div id="${getVenueSectionId('reviews')}" class="venue-section venue-surface-card">
+                <div class="venue-section-heading">
+                    <div>
+                        <span class="venue-section-kicker">Reviews</span>
+                        <h2>What customers say</h2>
+                    </div>
+                </div>
+                ${reviewIntro}
+                <div class="venue-reviews-list">
+                    ${reviewsHTML}
+                </div>
+            </div>
+
+            <div id="${getVenueSectionId('about')}" class="venue-section venue-surface-card">
+                <div class="venue-section-heading">
+                    <div>
+                        <span class="venue-section-kicker">About</span>
+                        <h2>Venue details</h2>
+                    </div>
+                </div>
+                <div class="venue-about-grid">
+                    <div class="venue-about-copy">
+                        <p>${aboutText || aboutFallback}</p>
+                    </div>
+                    <div class="venue-about-facts">
+                        ${aboutFacts.map(item => `<span class="venue-about-pill">${item}</span>`).join('')}
+                    </div>
+                </div>
+            </div>
+
+            ${locationSectionHTML}
+        </div>
+    `;
+
+    document.getElementById('dashboard-customer').style.display = 'none';
+    document.getElementById('venue-profile-view').style.display = 'block';
+    renderVenueProfileMiniMap(merchant);
+
+    if (options.focusSection) {
+        requestAnimationFrame(() => scrollVenueProfileSection(options.focusSection));
+    } else if (!options.preserveScroll) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+}
+
+window.closeVenueProfile = function() {
+    currentVenueProfileMerchantId = null;
+    venueProfileMap = null;
+    venueProfileMapMarker = null;
+    document.getElementById('venue-profile-view').style.display = 'none';
+    document.getElementById('dashboard-customer').style.display = 'block';
+};
+
+window.openBookingFromProfile = function(merchantId, preselectedServiceJson = null) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+
+    let initialServices = [];
+    if (preselectedServiceJson) {
+        try {
+            const preselectedService = JSON.parse(decodeURIComponent(preselectedServiceJson));
+            const basePrice = Number(preselectedService.price) || 0;
+            initialServices.push({
+                name: preselectedService.name,
+                price: basePrice,
+                basePrice: basePrice,
+                duration: preselectedService.duration
+            });
+        } catch(e) {
+            console.error("Failed to parse preselected service:", e);
+        }
+    }
+
+    // Reset State
+    bookedSlotsCache = {};
+    bookingState = {
+        merchant: merchant,
+        services: initialServices,
+        selectedStaff: null,
+        date: null,
+        time: null,
+        step: 1,
+        bookedSlots: null,
+        policyAgreed: false,
+        autoAssignSeed: null
+    };
+
+    renderBookingWizard();
+    document.getElementById('booking-modal').style.display = 'flex';
+};
+
+window.openBookingForStaff = function(merchantId, staffId) {
+    const merchant = allMerchants.find(m => m.id === merchantId);
+    if (!merchant) return;
+
+    openBookingFromProfile(merchantId);
+    const selectedStaff = getBookableStaffOptions(merchant).find(member => member.id === staffId);
+    if (!selectedStaff) return;
+
+    bookingState.selectedStaff = selectedStaff;
+    renderBookingWizard();
+};
+
+// ========== CONTACT FORM ==========
+window.handleContactSubmit = async function() {
+    const nameEle = document.getElementById('contact-name');
+    const emailEle = document.getElementById('contact-email');
+    const subjectEle = document.getElementById('contact-subject');
+    const messageEle = document.getElementById('contact-message');
+
+    if (!nameEle || !emailEle || !subjectEle || !messageEle) return;
+
+    const name = nameEle.value.trim();
+    const email = emailEle.value.trim();
+    const subject = subjectEle.value.trim();
+    const message = messageEle.value.trim();
+
+    if (!name || !email || !subject || !message) {
+        showToast('Please fill out all fields', 'error');
+        return;
+    }
+
+    try {
+        await addDoc(collection(db, "messages"), {
+            name,
+            email,
+            subject,
+            message,
+            createdAt: Timestamp.now()
+        });
+        showToast('Message sent successfully! We will get back to you soon.', 'success');
+        document.getElementById('contact-form').reset();
+    } catch (e) {
+        console.error("Error sending message: ", e);
+        showToast('Failed to send message. Please try again.', 'error');
+    }
+};
+
+// ========== CUSTOMER DASHBOARD (My Appointments) ==========
+window.openMyAppointments = async function() {
+    if (!currentUser || currentUser.role !== 'customer') return;
+
+    // Hide everything else
+    document.getElementById('dashboard-customer').style.display = 'none';
+    const venueProfileView = document.getElementById('venue-profile-view');
+    if(venueProfileView) venueProfileView.style.display = 'none';
+    
+    document.getElementById('customer-appointments-view').style.display = 'block';
+
+    const upcomingList = document.getElementById('appointments-list-upcoming');
+    const pastList = document.getElementById('appointments-list-past');
+
+    upcomingList.innerHTML = '<div class="loading-spinner">Loading...</div>';
+    pastList.innerHTML = '<div class="loading-spinner">Loading...</div>';
+
+    try {
+        // Query by userId (which is how submitBooking saves it)
+        const userId = currentUser.id || currentUser.phone;
+        const q = query(collection(db, "bookings"), where("userId", "==", userId));
+        const snapshot = await getDocs(q);
+
+        const now = new Date();
+        let upcoming = [];
+        let past = [];
+
+        snapshot.forEach(docSnap => {
+            const b = { id: docSnap.id, ...docSnap.data() };
+            // Parse appointment date from bookingDate (Timestamp or Date) or fall back to date string
+            let appointmentDate;
+            try {
+                if (b.bookingDate?.toDate) {
+                    appointmentDate = b.bookingDate.toDate();
+                } else if (b.bookingDate) {
+                    appointmentDate = new Date(b.bookingDate);
+                } else if (b.date && b.time) {
+                    appointmentDate = new Date(`${b.date}T${b.time}`);
+                } else {
+                    appointmentDate = new Date(0); // fallback to epoch
+                }
+            } catch(e) {
+                appointmentDate = new Date(0);
+            }
+            
+            if (appointmentDate > now && b.status !== 'cancelled') {
+                upcoming.push(b);
+            } else {
+                past.push(b);
+            }
+        });
+
+        // Render upcoming
+        if (upcoming.length > 0) {
+            upcoming.sort((a,b) => new Date(`${a.date}T${a.time}`) - new Date(`${b.date}T${b.time}`));
+            upcomingList.innerHTML = upcoming.map(b => generateAppointmentCard(b, true)).join('');
+        } else {
+            upcomingList.innerHTML = '<p style="color:#666;">No upcoming appointments.</p>';
+        }
+
+        // Render past
+        if (past.length > 0) {
+            past.sort((a,b) => new Date(`${b.date}T${b.time}`) - new Date(`${a.date}T${a.time}`));
+            pastList.innerHTML = past.map(b => generateAppointmentCard(b, false)).join('');
+        } else {
+            pastList.innerHTML = '<p style="color:#666;">No past appointments.</p>';
+        }
+
+    } catch (e) {
+        console.error("Error loading customer bookings: ", e);
+        upcomingList.innerHTML = '<p>Failed to load bookings.</p>';
+        pastList.innerHTML = '<p>Failed to load bookings.</p>';
+    }
+};
+
+window.closeMyAppointments = function() {
+    document.getElementById('customer-appointments-view').style.display = 'none';
+    document.getElementById('dashboard-customer').style.display = 'block';
+};
+
+window.switchAppointmentTab = function(tab) {
+    document.getElementById('tab-upcoming').classList.remove('active');
+    document.getElementById('tab-past').classList.remove('active');
+    document.getElementById('appointments-list-upcoming').style.display = 'none';
+    document.getElementById('appointments-list-past').style.display = 'none';
+
+    document.getElementById(`tab-${tab}`).classList.add('active');
+    document.getElementById(`appointments-list-${tab}`).style.display = 'flex';
+};
+
+function generateAppointmentCard(b, isUpcoming) {
+    const statusClass = b.status === 'cancelled' ? 'status-cancelled' : (isUpcoming ? 'status-upcoming' : 'status-past');
+    const statusText = b.status === 'cancelled' ? 'Cancelled' : (isUpcoming ? 'Upcoming' : 'Completed');
+    
+    // Resolve store name
+    const storeNameDisplay = b.storeName || (allMerchants.find(m => m.id === b.storeId)?.name) || 'Hewrina Venue';
+
+    // Parse date - could be bookingDate (Timestamp), date (string), or bookingTime
+    let dateDisplay = 'Date unavailable';
+    let timeDisplay = b.bookingTime || b.time || '';
+    try {
+        const d = b.bookingDate?.toDate ? b.bookingDate.toDate() : (b.bookingDate ? new Date(b.bookingDate) : (b.date ? new Date(b.date) : null));
+        if (d && !isNaN(d.getTime())) {
+            dateDisplay = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            if (!timeDisplay) {
+                timeDisplay = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+            }
+        }
+    } catch(e) {}
+
+    const staffLine = b.staffMember && b.staffMember.name && b.staffMember.name !== 'Anyone available' 
+        ? `<p><strong>Staff:</strong> ${b.staffMember.name}</p>` : '';
+
+    return `
+        <div class="appointment-card">
+            <div class="appointment-info">
+                <h3>${storeNameDisplay}</h3>
+                <p><strong>Date:</strong> ${dateDisplay} at ${timeDisplay}</p>
+                <p><strong>Services:</strong> ${b.services ? b.services.map(s => s.name).join(', ') : (b.serviceName || 'Details unavailable')}</p>
+                ${staffLine}
+                <p><strong>Total:</strong> ${(b.price || b.servicePrice || b.totalPrice) ? (b.price || b.servicePrice || b.totalPrice).toLocaleString() + ' IQD' : 'N/A'}</p>
+            </div>
+            <div class="appointment-meta">
+                <span class="appointment-status ${statusClass}">${statusText}</span>
+                ${!isUpcoming && b.status !== 'cancelled' ? `<button class="btn-outline" style="padding: 6px 12px; font-size: 0.85rem;" onclick="closeMyAppointments(); setTimeout(() => openMerchantDetails('${b.storeId}'), 100)">Rebook</button>` : ''}
+            </div>
+        </div>
+    `;
 }

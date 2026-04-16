@@ -3,8 +3,21 @@
     "public": ".",
     "ignore": [
       "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
+      ".firebaserc",
+      ".firebase/**",
+      ".git/**",
+      ".github/**",
+      "**/node_modules/**",
+      "docs/**",
+      "Hewrina_Website_*.pdf",
+      "Hewrina_Website_*.txt",
+      "project_handoff.md",
+      "package.json",
+      "package-lock.json",
+      "firestore.rules",
+      "firestore.indexes.json",
+      "firebase-debug.log",
+      "**/.*"
     ],
     "rewrites": [
       {
